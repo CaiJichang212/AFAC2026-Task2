@@ -1,0 +1,21 @@
+api:
+  url: "${FINIX_API_URL}"
+  timeout_seconds: 240
+  max_retries: 3
+  concurrency: 4
+  per_user_concurrency: 1
+chunk:
+  max_chunk_pixels: 4000000
+  table_full_page_max_pixels: 8000000
+  long_window_height: 4000
+  long_vertical_overlap: 320
+  table_horizontal_overlap: 160
+  table_vertical_overlap: 220
+merge:
+  dedup_window_chars_long: 1200
+  dedup_window_chars_table: 600
+  dedup_similarity_threshold: 0.88
+quality:
+  max_duplication_ratio: 0.18
+  max_api_failure_ratio: 0.20
+  max_reruns_per_file: 2

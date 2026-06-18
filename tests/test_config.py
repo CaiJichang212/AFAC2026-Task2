@@ -1,0 +1,198 @@
+from pathlib import Path
+
+import pytest
+
+from finix_restore.cli import parse_args
+from finix_restore.config import ConfigError, load_config
+from finix_restore.paths import RunPaths
+
+
+def _write_yaml(path: Path) -> None:
+    path.write_text(
+        """
+api:
+  url: "${FINIX_API_URL}"
+  timeout_seconds: 240
+  max_retries: 3
+  concurrency: 8
+  per_user_concurrency: 1
+chunk:
+  max_chunk_pixels: 12000000
+  table_full_page_max_pixels: 16000000
+  long_window_height: 4000
+  long_vertical_overlap: 320
+  table_horizontal_overlap: 160
+  table_vertical_overlap: 220
+merge:
+  dedup_window_chars_long: 1200
+  dedup_window_chars_table: 600
+  dedup_similarity_threshold: 0.88
+quality:
+  max_duplication_ratio: 0.18
+  max_api_failure_ratio: 0.20
+  max_reruns_per_file: 2
+""",
+        encoding="utf-8",
+    )
+
+
+def test_config_requires_api_key(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.delenv("FINIX_API_KEY", raising=False)
+    monkeypatch.setenv("apiKey", "")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1")
+    monkeypatch.setenv("userIds", "")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="FINIX_API_KEY"):
+        load_config(args)
+
+
+def test_config_requires_user_ids(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("apiKey", "")
+    monkeypatch.setenv("FINIX_USER_IDS", " , ")
+    monkeypatch.setenv("userIds", "")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="FINIX_USER_IDS"):
+        load_config(args)
+
+
+def test_dry_run_does_not_require_api_credentials(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.delenv("FINIX_API_KEY", raising=False)
+    monkeypatch.delenv("FINIX_USER_IDS", raising=False)
+    monkeypatch.setenv("apiKey", "")
+    monkeypatch.setenv("userIds", "")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+            "--dry_run",
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.dry_run is True
+    assert config.api_key == ""
+    assert config.user_ids == ["dry_run"]
+
+
+def test_config_accepts_legacy_env_key_names(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.delenv("FINIX_API_KEY", raising=False)
+    monkeypatch.delenv("FINIX_USER_IDS", raising=False)
+    monkeypatch.setenv("apiKey", "legacy-secret")
+    monkeypatch.setenv("userIds", "u1,u2")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.api_key == "legacy-secret"
+    assert config.user_ids == ["u1", "u2"]
+    assert config.snapshot()["api_key"] == "***"
+
+
+def test_config_keeps_repeated_input_dirs_and_caps_concurrency(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_a = tmp_path / "a"
+    input_b = tmp_path / "b"
+    input_a.mkdir()
+    input_b.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1,u2")
+    monkeypatch.setenv("FINIX_API_URL", "https://example.test/api")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_a),
+            "--input_dir",
+            str(input_b),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+        ]
+    )
+    config = load_config(args)
+
+    assert config.input_dirs == [input_a, input_b]
+    assert config.api["concurrency"] == 2
+    assert config.api_url == "https://example.test/api"
+    assert config.snapshot()["api_key"] == "***"
+    assert config.paths.logs_dir.exists()
+
+
+def test_run_paths_creates_expected_directories(tmp_path):
+    paths = RunPaths.from_work_dir(tmp_path / "outputs" / "run")
+
+    assert paths.profiles_dir.exists()
+    assert paths.chunks_dir.exists()
+    assert paths.api_raw_dir.exists()
+    assert paths.normalized_dir.exists()
+    assert paths.merged_dir.exists()
+    assert paths.qc_dir.exists()
+    assert paths.logs_dir.exists()
+    assert paths.metrics_dir.exists()

@@ -10,14 +10,26 @@
 
 ---
 
+## 0. 审核修订记录
+
+本轮审核发现并修正以下计划问题：
+
+- 单输入目录不足：A/B 榜数据通常分成长条和表格两个图片目录，原计划只能运行一个 `--input_dir`，容易生成半量提交；现改为支持重复传入 `--input_dir` 并生成单个合并 CSV。
+- 运行目录不一致：原计划多处把中间产物写死为 `outputs/...`，会绕过 `--work_dir` 并导致多次实验互相污染；现统一为 `{work_dir}/...`。
+- 文件任务不一致：目标结构列出了 `paths.py`，但任务未创建；Task 2 修改了尚未创建的 `pipeline.py`；Task 4 把尚未创建的配置文件标为 Modify；现已修正。
+- 类型契约缺口：`ChunkText`、`MergeResult`、`TableRepairResult` 等后续接口引用的类型未定义；现补入 `models.py` 契约。
+- 质量基线缺口：`too_short` 依赖训练分布 P10，但原计划没有定义统计来源；现新增 `configs/quality_stats.yaml` 与兜底阈值。
+- 本地评估映射缺口：训练集存在 `id_mapping.csv`，原计划只按目录匹配 GT；现要求本地评估优先使用映射文件，避免图片名和 Markdown 名不一致。
+
 ## 1. 目标与强约束
 
 ### 1.1 竞赛目标
 
-- 输入：`data/AFAC A榜评测数据集/*/images` 或后续 B 榜图片目录。
+- 输入：一个或多个图片目录，例如 `data/AFAC A榜评测数据集/finix_huge_long_rest_A/images` 与 `data/AFAC A榜评测数据集/finix_huge_table_rest_A/images`，后续 B 榜同理。
 - 输出：仅含 `file_name,ground_truth` 两列的 UTF-8 CSV，字段内换行由 CSV writer 正确转义。
 - 评分关注：文本编辑距离、表格 TEDS、阅读顺序编辑距离。
 - 工程目标：100 张测试图片在 3 小时内稳定产出，失败可断点续跑，输出可追溯到切块、API 原始响应和后处理日志。
+- 多输入目录合并时，`file_name` 必须全局唯一；如两个目录出现同名图片，流程应阻断并要求用户指定独立运行或重命名输入，不能静默覆盖。
 
 ### 1.2 合规红线
 
@@ -42,7 +54,8 @@
 ├── configs/
 │   ├── default.yaml
 │   ├── long_strip.yaml
-│   └── table_grid.yaml
+│   ├── table_grid.yaml
+│   └── quality_stats.yaml
 ├── finix_restore/
 │   ├── __init__.py
 │   ├── cli.py
@@ -62,26 +75,27 @@
 │   ├── submission.py
 │   └── pipeline.py
 ├── tests/
-│   ├── fixtures/
-│   │   ├── mini_long.jpg
-│   │   ├── mini_table.html
-│   │   └── chunks_manifest.json
 │   ├── test_config.py
 │   ├── test_profiler.py
+│   ├── test_layout_sentry.py
 │   ├── test_chunkers.py
+│   ├── test_finix_api.py
+│   ├── test_normalizer.py
+│   ├── test_reading_order.py
 │   ├── test_dedup.py
 │   ├── test_table_merger.py
 │   ├── test_quality_gate.py
+│   ├── test_local_eval.py
 │   └── test_submission.py
 └── docs/
     ├── reproduce.md
     └── prompt_specs.md
 ```
 
-运行期产物统一写入 `outputs/`，不提交真实结果缓存：
+运行期产物统一写入 `{work_dir}`，不提交真实结果缓存：
 
 ```text
-outputs/
+{work_dir}/
 ├── profiles/{stem}.json
 ├── chunks/{stem}/{chunk_id}.jpg
 ├── chunks/{stem}/manifest.json
@@ -126,6 +140,31 @@ class Chunk:
     col: int
     overlap: dict[str, int]
     image_sha1: str
+
+@dataclass(frozen=True)
+class ChunkText:
+    chunk: Chunk
+    markdown: str
+    block_type: Literal["body", "toc", "table", "header_footer", "unknown"]
+    source: Literal["api", "cache", "manual_fixture"]
+
+@dataclass(frozen=True)
+class MergeResult:
+    markdown: str
+    removed_ranges: list[tuple[str, int, int]]
+    warnings: list[str]
+
+@dataclass(frozen=True)
+class TableRepairResult:
+    markdown: str
+    repaired_tags: int
+    warnings: list[str]
+
+@dataclass(frozen=True)
+class QualityReport:
+    passed: bool
+    risks: list[str]
+    metrics: dict[str, float | int | str]
 ```
 
 验收点：
@@ -134,7 +173,33 @@ class Chunk:
 - `chunk_id` 稳定可复现，建议为 `sha1(file_name + bbox + image_sha1)[:16]`。
 - 模块之间不得传递裸字典作为主要领域对象。
 
-### 3.2 `finix_restore/config.py`
+### 3.2 `finix_restore/paths.py`
+
+集中管理所有运行期路径，避免模块各自拼接固定 `outputs/`。
+
+路径契约：
+
+```python
+@dataclass(frozen=True)
+class RunPaths:
+    work_dir: Path
+    profiles_dir: Path
+    chunks_dir: Path
+    api_raw_dir: Path
+    normalized_dir: Path
+    merged_dir: Path
+    qc_dir: Path
+    logs_dir: Path
+    metrics_dir: Path
+```
+
+验收点：
+
+- 所有模块通过 `RunPaths` 获取输出目录，不直接写死 `outputs/...`。
+- `RunPaths.from_work_dir(Path("outputs/long_A"))` 必须创建所需目录。
+- `output_csv` 可以位于 `work_dir` 内或外部显式路径，但 CSV 回读校验必须使用实际传入路径。
+
+### 3.3 `finix_restore/config.py`
 
 负责读取 YAML、`.env` 和命令行覆盖参数，统一生成 `RunConfig`。
 
@@ -151,9 +216,26 @@ FINIX_API_URL=https://finixdocapi.alipay.com/api/finix_doc/call_with_file
 - 真实 `.env` 不提交；`.env.example` 只列变量名。
 - `FINIX_USER_IDS` 为英文逗号分隔列表，API 调度轮询使用。
 - 初始并发按 `min(config.api.concurrency, len(user_ids) * config.api.per_user_concurrency)` 控制。
-- 配置快照写入 `outputs/logs/config_snapshot.yaml`，其中 `api_key` 必须脱敏为 `***`。
+- 配置快照写入 `{work_dir}/logs/config_snapshot.yaml`，其中 `api_key` 必须脱敏为 `***`。
 
-### 3.3 `finix_restore/profiler.py`
+`RunConfig` 至少包含这些字段：
+
+```python
+@dataclass(frozen=True)
+class RunConfig:
+    input_dirs: list[Path]
+    output_csv: Path
+    paths: RunPaths
+    api_key: str
+    user_ids: list[str]
+    api_url: str
+    api: dict[str, int | str]
+    chunk: dict[str, int]
+    merge: dict[str, float | int]
+    quality: dict[str, float | int]
+```
+
+### 3.4 `finix_restore/profiler.py`
 
 读取图片尺寸、像素、长宽比、文件大小，并判断 `doc_type` 与 `risk_level`。
 
@@ -174,7 +256,7 @@ else:
 - profile JSON 与 PIL 读取尺寸完全一致。
 - 不根据文件名区分长条/表格。
 
-### 3.4 `finix_restore/layout_sentry.py`
+### 3.5 `finix_restore/layout_sentry.py`
 
 在缩略图或灰度低分辨率图上做投影、线条密度、白边检测。
 
@@ -196,14 +278,14 @@ class LayoutHints:
 - 所有缩略图坐标必须映射回原图坐标。
 - 检测失败时返回空提示，由 chunker 使用固定窗口降级。
 
-### 3.5 `finix_restore/chunkers.py`
+### 3.6 `finix_restore/chunkers.py`
 
 按文档类型生成切块和 `manifest.json`。
 
 策略契约：
 
 - `LongStripChunker`：保持原图宽度，纵向滑窗，默认窗口高度 4000px，纵向 overlap 320px，优先把 `y1` 移到附近空白带。
-- `TableGridChunker`：当整图像素低于 `table.full_page_max_pixels` 时先保存整图切块；否则按二维网格，默认单块不超过 12M 像素，横向 overlap 160px，纵向 overlap 220px。
+- `TableGridChunker`：当整图像素低于 `chunk.table_full_page_max_pixels` 时先保存整图切块；否则按二维网格，默认单块不超过 12M 像素，横向 overlap 160px，纵向 overlap 220px。
 - `PageChunker`：普通图小于阈值时整页，否则按最大像素拆分。
 
 覆盖校验：
@@ -222,7 +304,7 @@ def assert_cover_height(chunks, width, height):
 
 文档中只保留上面这种约束片段；完整实现进入代码。
 
-### 3.6 `finix_restore/finix_api.py`
+### 3.7 `finix_restore/finix_api.py`
 
 封装 FinixDoc-VL API 上传、并发、重试、缓存和日志。
 
@@ -243,8 +325,8 @@ response:
 缓存契约：
 
 - 缓存命中条件：`chunk_id + image_sha1 + api_url` 完全一致。
-- 原始响应写入 `outputs/api_raw/{stem}/{chunk_id}.md`。
-- API 请求日志写入 `outputs/logs/run.jsonl`，字段包括 `event=api_call`、`file_name`、`chunk_id`、`user_id`、`status`、`elapsed_ms`、`retry_index`，不得写 `apiKey`。
+- 原始响应写入 `{work_dir}/api_raw/{stem}/{chunk_id}.md`。
+- API 请求日志写入 `{work_dir}/logs/run.jsonl`，字段包括 `event=api_call`、`file_name`、`chunk_id`、`user_id`、`status`、`elapsed_ms`、`retry_index`，不得写 `apiKey`。
 
 重试规则：
 
@@ -252,7 +334,7 @@ response:
 - HTTP 401/403：立即失败并提示检查 `FINIX_USER_IDS` 或 `FINIX_API_KEY`。
 - 单用户连续失败时临时熔断该 `userId`，继续使用其他用户。
 
-### 3.7 `finix_restore/normalizer.py`
+### 3.8 `finix_restore/normalizer.py`
 
 做保守 Markdown 规范化。
 
@@ -270,7 +352,7 @@ response:
 - 不把 HTML 表格强制转管道表格。
 - 不语义补全文本。
 
-### 3.8 `finix_restore/reading_order.py`
+### 3.9 `finix_restore/reading_order.py`
 
 按 `Chunk` 坐标、文档类型和局部结构生成合并顺序。
 
@@ -281,7 +363,7 @@ response:
 - 多栏：优先识别跨栏标题，其余内容列内从上到下，再从左到右。
 - 目录区：`# 条款目录` 后连续标题行标记为 `toc_block`，不参与普通重复删除。
 
-### 3.9 `finix_restore/dedup.py`
+### 3.10 `finix_restore/dedup.py`
 
 处理 overlap 导致的重复和边界截断。
 
@@ -309,7 +391,7 @@ class DedupMerger:
 
 去重必须绑定 overlap 坐标和邻接关系，不能全局按文本包含删除，否则会误删目录项、标题复现和合法重复条款。
 
-### 3.10 `finix_restore/table_merger.py`
+### 3.11 `finix_restore/table_merger.py`
 
 解析和修复 HTML 表格，优先保持 API 原结构。
 
@@ -337,14 +419,14 @@ def test_keep_empty_td():
     assert "<td></td>" in repaired
 ```
 
-### 3.11 `finix_restore/quality_gate.py`
+### 3.12 `finix_restore/quality_gate.py`
 
 对单图 Markdown 和最终 CSV 做阻断式质量检查。
 
 文件级检查：
 
 - `ground_truth.strip()` 非空。
-- 输出长度不低于同类训练分布 P10 的 30%，否则标记 `too_short`。
+- 输出长度不低于同类训练分布 P10 的 30%，否则标记 `too_short`；若 `configs/quality_stats.yaml` 不存在，则使用长条 2000 字、表格 5000 字作为保守下限并只标记风险，不阻断提交。
 - 重复 200 字窗口比例超过阈值时标记 `high_duplication`。
 - HTML `<table>/<tr>/<td>/<th>` 标签闭合。
 - 表格行列数量异常短行比例超过阈值时标记 `table_ragged_rows`。
@@ -356,9 +438,9 @@ CSV 级检查：
 - 列名严格等于 `["file_name", "ground_truth"]`。
 - 行数等于输入图片数。
 - `file_name` 集合与输入图片文件名集合一致。
-- 无重复 `file_name`。
+- 无重复 `file_name`；多输入目录发现同名图片时，在生成任何提交前阻断。
 
-### 3.12 `finix_restore/retry_planner.py`
+### 3.13 `finix_restore/retry_planner.py`
 
 根据 `QualityGate` 风险决定是否重跑局部切块。
 
@@ -369,9 +451,9 @@ CSV 级检查：
 - `html_broken`：表格图改用更细网格，保留原始响应做对比。
 - `api_timeout`：降低 `max_chunk_pixels`，切换到下一个可用 `userId`。
 
-每次重跑都写入 `outputs/qc/{stem}.json` 的 `reruns` 数组，默认最多 2 轮，避免无限循环。
+每次重跑都写入 `{work_dir}/qc/{stem}.json` 的 `reruns` 数组，默认最多 2 轮，避免无限循环。
 
-### 3.13 `finix_restore/submission.py`
+### 3.14 `finix_restore/submission.py`
 
 负责最终 CSV 写入和复验。
 
@@ -395,8 +477,9 @@ df.to_csv(output_csv, index=False, encoding="utf-8", lineterminator="\n")
 ```bash
 python main.py \
   --input_dir "data/AFAC A榜评测数据集/finix_huge_long_rest_A/images" \
-  --output_csv outputs/submission_long_A.csv \
-  --work_dir outputs/long_A \
+  --input_dir "data/AFAC A榜评测数据集/finix_huge_table_rest_A/images" \
+  --output_csv outputs/submission_A.csv \
+  --work_dir outputs/A \
   --config configs/default.yaml
 ```
 
@@ -404,11 +487,11 @@ python main.py \
 
 | 参数 | 必填 | 说明 |
 | --- | --- | --- |
-| `--input_dir` | 是 | 图片目录。 |
+| `--input_dir` | 是 | 图片目录，可重复传入；最终 CSV 合并所有目录图片。 |
 | `--output_csv` | 是 | 输出 CSV 路径。 |
 | `--work_dir` | 否 | 中间产物目录，默认 `outputs/run`。 |
 | `--config` | 否 | YAML 配置，默认 `configs/default.yaml`。 |
-| `--limit` | 否 | 调试时只跑前 N 张，正式提交不得使用。 |
+| `--limit` | 否 | 调试时只跑排序后的前 N 张，正式提交不得使用。 |
 | `--resume` | 否 | 启用缓存和断点续跑，默认开启。 |
 | `--force_api` | 否 | 忽略 API 缓存重跑。 |
 | `--dry_run` | 否 | 只做画像、切块、manifest 和 CSV 空结构校验，不调用 API。 |
@@ -418,7 +501,18 @@ python main.py \
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-python main.py --input_dir "$1" --output_csv "$2" --work_dir "${3:-outputs/run}" --config "${4:-configs/default.yaml}"
+INPUT_DIRS="${1:?input dirs, separated by comma}"
+OUTPUT_CSV="${2:?output csv}"
+WORK_DIR="${3:-outputs/run}"
+CONFIG="${4:-configs/default.yaml}"
+
+ARGS=()
+IFS=',' read -ra DIRS <<< "$INPUT_DIRS"
+for dir in "${DIRS[@]}"; do
+  ARGS+=(--input_dir "$dir")
+done
+
+python main.py "${ARGS[@]}" --output_csv "$OUTPUT_CSV" --work_dir "$WORK_DIR" --config "$CONFIG"
 ```
 
 ### 4.2 `configs/default.yaml`
@@ -434,6 +528,7 @@ api:
   per_user_concurrency: 1
 chunk:
   max_chunk_pixels: 12000000
+  table_full_page_max_pixels: 16000000
   long_window_height: 4000
   long_vertical_overlap: 320
   table_horizontal_overlap: 160
@@ -446,6 +541,17 @@ quality:
   max_duplication_ratio: 0.18
   max_api_failure_ratio: 0.20
   max_reruns_per_file: 2
+```
+
+`configs/quality_stats.yaml` 初始可由训练集统计脚本生成；在生成前保留以下默认值：
+
+```yaml
+long_strip:
+  p10_chars: 6972
+  min_chars_floor: 2000
+table_page:
+  p10_chars: 9253
+  min_chars_floor: 5000
 ```
 
 ---
@@ -461,24 +567,26 @@ quality:
 - Create: `requirements.txt`
 - Create: `.env.example`
 - Create: `configs/default.yaml`
+- Create: `configs/quality_stats.yaml`
 - Create: `finix_restore/__init__.py`
 - Create: `finix_restore/config.py`
 - Create: `finix_restore/cli.py`
+- Create: `finix_restore/paths.py`
 - Create: `tests/test_config.py`
 
-- [ ] **Step 1: 写配置加载失败测试**
+- [x] **Step 1: 写配置加载失败测试**
 
-  覆盖 `.env` 缺少 `FINIX_API_KEY`、`FINIX_USER_IDS` 为空、并发大于用户数时的行为。
+  覆盖 `.env` 缺少 `FINIX_API_KEY`、`FINIX_USER_IDS` 为空、并发大于用户数时的行为；覆盖重复传入两个 `--input_dir` 后配置中保留两个目录。
 
   Run: `pytest tests/test_config.py -q`
 
   Expected: 新测试在实现前失败。
 
-- [ ] **Step 2: 实现 `RunConfig` 和 CLI 参数解析**
+- [x] **Step 2: 实现 `RunConfig`、`RunPaths` 和 CLI 参数解析**
 
-  最小实现只需要读 YAML、环境变量和命令行，返回统一配置对象；不得打印真实密钥。
+  最小实现只需要读 YAML、环境变量和命令行，返回统一配置对象；`RunPaths` 从 `--work_dir` 派生所有产物目录；不得打印真实密钥。
 
-- [ ] **Step 3: 补充 `.env.example`**
+- [x] **Step 3: 补充 `.env.example`**
 
   内容只包含：
 
@@ -488,7 +596,7 @@ quality:
   FINIX_API_URL=https://finixdocapi.alipay.com/api/finix_doc/call_with_file
   ```
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
   Run: `pytest tests/test_config.py -q`
 
@@ -497,7 +605,7 @@ quality:
 - [ ] **Step 5: 提交**
 
   ```bash
-  git add main.py run.sh requirements.txt .env.example configs/default.yaml finix_restore tests/test_config.py
+  git add main.py run.sh requirements.txt .env.example configs/default.yaml configs/quality_stats.yaml finix_restore tests/test_config.py
   git commit -m "chore: scaffold task2 restore pipeline"
   ```
 
@@ -508,21 +616,20 @@ quality:
 - Create: `finix_restore/models.py`
 - Create: `finix_restore/profiler.py`
 - Create: `tests/test_profiler.py`
-- Modify: `finix_restore/pipeline.py`
 
-- [ ] **Step 1: 写画像测试**
+- [x] **Step 1: 写画像测试**
 
   覆盖长宽比大于 10 判为 `long_strip`、A 系列表格比例且大像素判为 `table_page`、极大像素判为 `extreme` 风险。
 
-- [ ] **Step 2: 实现 `ImageProfiler`**
+- [x] **Step 2: 实现 `ImageProfiler`**
 
   只读取元信息，不把整张超大图转成 numpy 数组。
 
-- [ ] **Step 3: 写 profile JSON**
+- [x] **Step 3: 写 profile JSON**
 
-  路径为 `outputs/profiles/{stem}.json`，字段与 `ImageProfile` 一致。
+  路径为 `{work_dir}/profiles/{stem}.json`，字段与 `ImageProfile` 一致。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
   Run: `pytest tests/test_profiler.py -q`
 
@@ -536,19 +643,19 @@ quality:
 - Create: `tests/test_layout_sentry.py`
 - Modify: `finix_restore/models.py`
 
-- [ ] **Step 1: 写缩略图坐标映射测试**
+- [x] **Step 1: 写缩略图坐标映射测试**
 
   输入缩略图空白带坐标，断言映射回原图后不越界。
 
-- [ ] **Step 2: 实现水平/垂直投影和白边检测**
+- [x] **Step 2: 实现水平/垂直投影和白边检测**
 
   使用灰度缩略图即可，目标是给 chunker 提供候选切线。
 
-- [ ] **Step 3: 实现检测失败降级**
+- [x] **Step 3: 实现检测失败降级**
 
   对低对比度或异常图返回空 `LayoutHints`，而不是抛出导致全局中断。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
   Run: `pytest tests/test_layout_sentry.py -q`
 
@@ -561,26 +668,26 @@ quality:
 - Create: `finix_restore/chunkers.py`
 - Create: `tests/test_chunkers.py`
 - Modify: `finix_restore/models.py`
-- Modify: `configs/long_strip.yaml`
-- Modify: `configs/table_grid.yaml`
+- Create: `configs/long_strip.yaml`
+- Create: `configs/table_grid.yaml`
 
-- [ ] **Step 1: 写 manifest 覆盖测试**
+- [x] **Step 1: 写 manifest 覆盖测试**
 
   构造 1500×10000 长条图和 6000×4200 表格图，断言切块覆盖全图、bbox 不越界、`chunk_id` 稳定。
 
-- [ ] **Step 2: 实现 `LongStripChunker`**
+- [x] **Step 2: 实现 `LongStripChunker`**
 
   固定宽度、纵向滑窗、空白带微调、overlap 记录。
 
-- [ ] **Step 3: 实现 `TableGridChunker`**
+- [x] **Step 3: 实现 `TableGridChunker`**
 
   按最大像素阈值计算网格，优先使用投影空白带；找不到空白带时按等距切分。
 
-- [ ] **Step 4: 写切块图片和 `manifest.json`**
+- [x] **Step 4: 写切块图片和 `manifest.json`**
 
-  路径必须为 `outputs/chunks/{stem}/{chunk_id}.jpg` 和 `outputs/chunks/{stem}/manifest.json`。
+  路径必须为 `{work_dir}/chunks/{stem}/{chunk_id}.jpg` 和 `{work_dir}/chunks/{stem}/manifest.json`。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_chunkers.py -q`
 
@@ -594,23 +701,23 @@ quality:
 - Create: `tests/test_finix_api.py`
 - Modify: `finix_restore/config.py`
 
-- [ ] **Step 1: 写 mock API 测试**
+- [x] **Step 1: 写 mock API 测试**
 
   使用 monkeypatch 或 responses/httpx mock，断言 multipart 字段含 `userId`、`apiKey`、`fileName`、`file`，日志不含真实 `apiKey`。
 
-- [ ] **Step 2: 实现缓存优先**
+- [x] **Step 2: 实现缓存优先**
 
-  如果 `outputs/api_raw/{stem}/{chunk_id}.md` 存在且 manifest hash 匹配，则不发请求。
+  如果 `{work_dir}/api_raw/{stem}/{chunk_id}.md` 存在且 manifest hash 匹配，则不发请求。
 
-- [ ] **Step 3: 实现 userId 轮询和并发限流**
+- [x] **Step 3: 实现 userId 轮询和并发限流**
 
   初始并发不超过 `len(FINIX_USER_IDS)`，单用户默认 1 个并发，失败后可熔断。
 
-- [ ] **Step 4: 实现重试**
+- [x] **Step 4: 实现重试**
 
   空响应、HTTP 5xx、超时执行指数退避；401/403 直接失败。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_finix_api.py -q`
 
@@ -625,23 +732,23 @@ quality:
 - Create: `tests/test_normalizer.py`
 - Create: `tests/test_reading_order.py`
 
-- [ ] **Step 1: 写保守规范化测试**
+- [x] **Step 1: 写保守规范化测试**
 
   覆盖 `##1.1` 修复、行尾空格删除、金额和条款号不改写。
 
-- [ ] **Step 2: 写排序测试**
+- [x] **Step 2: 写排序测试**
 
   覆盖长条按 `y0`、表格按 `row,col`、目录区不被标记为普通重复文本。
 
-- [ ] **Step 3: 实现 `MarkdownNormalizer`**
+- [x] **Step 3: 实现 `MarkdownNormalizer`**
 
   只做格式最小修复，不做语义纠错。
 
-- [ ] **Step 4: 实现 `ReadingOrderResolver`**
+- [x] **Step 4: 实现 `ReadingOrderResolver`**
 
   先坐标排序，再用标题编号和目录模式做局部标记。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_normalizer.py tests/test_reading_order.py -q`
 
@@ -654,23 +761,23 @@ quality:
 - Create: `finix_restore/dedup.py`
 - Create: `tests/test_dedup.py`
 
-- [ ] **Step 1: 写 overlap 去重测试**
+- [x] **Step 1: 写 overlap 去重测试**
 
   构造相邻切块末尾/开头重复 100 字，断言合并后只保留一次。
 
-- [ ] **Step 2: 写目录保护测试**
+- [x] **Step 2: 写目录保护测试**
 
   构造目录标题和正文标题重复，断言目录项不被删除。
 
-- [ ] **Step 3: 实现 prefix/suffix 匹配**
+- [x] **Step 3: 实现 prefix/suffix 匹配**
 
   用 `difflib.SequenceMatcher` 或轻量 n-gram 相似度即可，必须受邻接切块和 overlap 约束。
 
-- [ ] **Step 4: 实现段落续接**
+- [x] **Step 4: 实现段落续接**
 
   前块末尾未闭合括号、句子或 HTML 标签时，合并时避免额外插入空段。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_dedup.py -q`
 
@@ -683,23 +790,23 @@ quality:
 - Create: `finix_restore/table_merger.py`
 - Create: `tests/test_table_merger.py`
 
-- [ ] **Step 1: 写标签闭合测试**
+- [x] **Step 1: 写标签闭合测试**
 
   缺失 `</tr>`、`</table>` 时应可修复，并记录 `repaired_tags`。
 
-- [ ] **Step 2: 写空单元格保持测试**
+- [x] **Step 2: 写空单元格保持测试**
 
   `<td></td>` 必须保留。
 
-- [ ] **Step 3: 写重复表头删除测试**
+- [x] **Step 3: 写重复表头删除测试**
 
   相邻切块同一表头重复时只保留一次，但非邻接重复不得删除。
 
-- [ ] **Step 4: 实现 `TableMerger.repair`**
+- [x] **Step 4: 实现 `TableMerger.repair`**
 
   使用 HTML parser 修复结构，保留原始单元格顺序和空单元格。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_table_merger.py -q`
 
@@ -713,23 +820,23 @@ quality:
 - Create: `finix_restore/retry_planner.py`
 - Create: `tests/test_quality_gate.py`
 
-- [ ] **Step 1: 写 CSV schema 测试**
+- [x] **Step 1: 写 CSV schema 测试**
 
-  列名错误、行数不一致、重复 `file_name` 都必须失败。
+  列名错误、行数不一致、重复 `file_name` 都必须失败；两个输入目录存在同名图片时必须在提交生成前失败。
 
-- [ ] **Step 2: 写文件级风险测试**
+- [x] **Step 2: 写文件级风险测试**
 
   空输出、HTML 破损、重复率过高、API 失败率过高要生成明确 risk code。
 
-- [ ] **Step 3: 实现 `QualityGate`**
+- [x] **Step 3: 实现 `QualityGate`**
 
-  输出 `outputs/qc/{stem}.json`，字段包括 `passed`、`risks`、`metrics`。
+  输出 `{work_dir}/qc/{stem}.json`，字段包括 `passed`、`risks`、`metrics`。
 
-- [ ] **Step 4: 实现 `RetryPlanner`**
+- [x] **Step 4: 实现 `RetryPlanner`**
 
   把 risk code 映射到缩小窗口、增大 overlap、降低并发或表格细网格。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_quality_gate.py -q`
 
@@ -745,23 +852,23 @@ quality:
 - Modify: `main.py`
 - Modify: `run.sh`
 
-- [ ] **Step 1: 写 dry-run E2E 测试**
+- [x] **Step 1: 写 dry-run E2E 测试**
 
-  使用 2 张 fixture 图片，不调用 API，断言会生成 profile、manifest、空结构 CSV 或明确 dry-run 报告。
+  使用测试临时目录动态生成 2 张小图片，不调用 API；断言会生成 profile、manifest、空结构 CSV 或明确 dry-run 报告；再用两个输入目录各 1 张不同文件名图片验证最终 CSV 行数为 2，并用两个输入目录同名图片验证流程阻断。
 
-- [ ] **Step 2: 实现 `Pipeline.run`**
+- [x] **Step 2: 实现 `Pipeline.run`**
 
   串联画像、感知、切块、API、规范化、排序、去重、表格修复、质检和 CSV 写入。
 
-- [ ] **Step 3: 实现断点续跑**
+- [x] **Step 3: 实现断点续跑**
 
   已有 profile、manifest、api_raw、merged 时优先复用；`--force_api` 才重打 API。
 
-- [ ] **Step 4: 实现 CSV 回读校验**
+- [x] **Step 4: 实现 CSV 回读校验**
 
   写完 `submission.csv` 后立即调用 `QualityGate.check_submission`。
 
-- [ ] **Step 5: 验证**
+- [x] **Step 5: 验证**
 
   Run: `pytest tests/test_submission.py -q`
 
@@ -776,19 +883,19 @@ quality:
 - Modify: `docs/reproduce.md`
 - Create: `docs/experiments.md`
 
-- [ ] **Step 1: 实现文本编辑距离本地评估**
+- [x] **Step 1: 实现文本编辑距离本地评估**
 
-  对训练集 `mds` 计算字符级归一化 edit distance，作为快速回归指标。
+  对训练集 `mds` 计算字符级归一化 edit distance，作为快速回归指标；优先读取同目录 `id_mapping.csv` 建立图片文件名与 GT Markdown 文件名的映射，缺失映射时才按同 stem 匹配。
 
-- [ ] **Step 2: 实现 HTML 表格基础统计**
+- [x] **Step 2: 实现 HTML 表格基础统计**
 
   统计 `<tr>`、`<td>`、空 `<td></td>` 数量差异，作为 TEDS 前置风险指标。
 
-- [ ] **Step 3: 建立消融记录模板**
+- [x] **Step 3: 建立消融记录模板**
 
-  写入 `docs/experiments.md`，记录整图、固定滑窗、空白线切块、去重、表格网格、表格修复、质量门禁重跑各实验。
+  写入 `docs/experiments.md`，记录整图、固定滑窗、空白线切块、去重、表格网格、表格修复、质量门禁重跑各实验；每条实验记录必须写明输入目录、配置文件、work_dir、提交 CSV 和评估 JSON。
 
-- [ ] **Step 4: 验证**
+- [x] **Step 4: 验证**
 
   Run: `pytest tests/test_local_eval.py -q`
 
@@ -803,15 +910,15 @@ quality:
 - Modify: `requirements.txt`
 - Modify: `.gitignore`
 
-- [ ] **Step 1: 写复现命令**
+- [x] **Step 1: 写复现命令**
 
   包含环境创建、依赖安装、`.env` 配置、A/B 榜运行命令、输出路径说明。
 
-- [ ] **Step 2: 写合规说明**
+- [x] **Step 2: 写合规说明**
 
   明确唯一 API 为 FinixDoc-VL；`docs/prompt_specs.md` 记录 API 当前无 prompt 参数，所有解析约束通过切块和后处理实现。
 
-- [ ] **Step 3: 补充 `.gitignore`**
+- [x] **Step 3: 补充 `.gitignore`**
 
   忽略 `.env`、`outputs/`、`*.pyc`、`.pytest_cache/`、`.ruff_cache/`。
 
@@ -820,11 +927,10 @@ quality:
   在 A 榜目录运行：
 
   ```bash
-  time bash run.sh "data/AFAC A榜评测数据集/finix_huge_long_rest_A/images" outputs/submission_long_A.csv outputs/long_A configs/default.yaml
-  time bash run.sh "data/AFAC A榜评测数据集/finix_huge_table_rest_A/images" outputs/submission_table_A.csv outputs/table_A configs/default.yaml
+  time bash run.sh "data/AFAC A榜评测数据集/finix_huge_long_rest_A/images,data/AFAC A榜评测数据集/finix_huge_table_rest_A/images" outputs/submission_A.csv outputs/A configs/default.yaml
   ```
 
-  Expected: 不崩溃；日志包含每图耗时、切块数、API 调用数、失败重试和质检结果。
+  Expected: 不崩溃；`outputs/submission_A.csv` 行数等于两个输入目录图片总数；日志包含每图耗时、切块数、API 调用数、失败重试和质检结果。
 
 ---
 
@@ -843,6 +949,7 @@ quality:
 - `test_dedup.py`：overlap 去重、目录不误删、段落续接。
 - `test_table_merger.py`：标签闭合、空 td 保留、重复表头处理。
 - `test_quality_gate.py`：文件级风险和 CSV 阻断。
+- `test_local_eval.py`：`id_mapping.csv` 映射、编辑距离、HTML 表格统计。
 - `test_submission.py`：CSV 可读、列名、行数、文件名集合。
 
 ### 6.2 集成测试
@@ -858,9 +965,10 @@ quality:
 
 ```bash
 python -m finix_restore.local_eval \
-  --pred_dir outputs/merged \
+  --pred_dir outputs/train_long/merged \
   --gt_dir "data/AFAC 训练数据集/finixdocbench_huge_long_100/mds" \
-  --output outputs/metrics/long_eval.json
+  --mapping_csv "data/AFAC 训练数据集/finixdocbench_huge_long_100/id_mapping.csv" \
+  --output outputs/train_long/metrics/long_eval.json
 ```
 
 验收指标不是线上分数替代品，但必须能暴露退化：

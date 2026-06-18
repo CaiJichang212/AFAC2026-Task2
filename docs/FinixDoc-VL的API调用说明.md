@@ -29,7 +29,7 @@ POST 表单上传图片，仅支持图片输入，返回对应的 Markdown 解�
 ```bash
 curl -X POST 'https://finixdocapi.alipay.com/api/finix_doc/call_with_file' \
   -F 'userId=finixB2002' \
-  -F 'apiKey=F935A5503983FB19F26FA3F00A94EBF9' \
+  -F 'apiKey=${FINIX_API_KEY}' \
   -F 'fileName=finixdoc.png' \
   -F 'file=@/Users/Downloads/finixdoc.png'
 ```
@@ -42,8 +42,7 @@ curl -X POST 'https://finixdocapi.alipay.com/api/finix_doc/call_with_file' \
 参赛调用用户 ID，只能使用指定白名单 ID。
 
 **apiKey：**  
-固定值为：  
-`F935A5503983FB19F26FA3F00A94EBF9`
+使用赛题发放的调用密钥，建议通过 `.env` 中的 `FINIX_API_KEY` 注入，不要写入代码或日志。
 
 **fileName：**  
 上传文件名，按实际文件填写，例如 `finixdoc.png`。

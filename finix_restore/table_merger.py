@@ -1,0 +1,64 @@
+from __future__ import annotations
+
+import re
+
+from bs4 import BeautifulSoup
+
+from finix_restore.models import TableRepairResult
+
+
+_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
+
+
+class TableMerger:
+    def repair(self, markdown: str) -> TableRepairResult:
+        if "<table" not in markdown.lower():
+            return TableRepairResult(markdown=markdown, repaired_tags=0, warnings=[])
+
+        repaired_tags = self._count_missing_closing_tags(markdown)
+        soup = BeautifulSoup(markdown, "html.parser")
+        warnings: list[str] = []
+        self._merge_adjacent_duplicate_headers(soup, markdown)
+        return TableRepairResult(markdown=soup.decode(formatter="minimal"), repaired_tags=repaired_tags, warnings=warnings)
+
+    def _count_missing_closing_tags(self, html: str) -> int:
+        missing = 0
+        lowered = html.lower()
+        for tag in ("table", "tr", "td", "th"):
+            opens = len(re.findall(fr"<{tag}\b", lowered))
+            closes = lowered.count(f"</{tag}>")
+            missing += max(0, opens - closes)
+        return missing
+
+    def _merge_adjacent_duplicate_headers(self, soup: BeautifulSoup, original: str) -> None:
+        tables = soup.find_all("table")
+        if len(tables) < 2:
+            return
+        adjacent_indexes = self._adjacent_table_indexes(original)
+        for idx in sorted(adjacent_indexes, reverse=True):
+            if idx <= 0 or idx >= len(tables):
+                continue
+            previous = tables[idx - 1]
+            current = tables[idx]
+            previous_rows = previous.find_all("tr")
+            current_rows = current.find_all("tr")
+            if not previous_rows or not current_rows:
+                continue
+            if self._row_key(previous_rows[0]) != self._row_key(current_rows[0]):
+                continue
+            for row in current_rows[1:]:
+                previous.append(row.extract())
+            current.decompose()
+
+    def _adjacent_table_indexes(self, original: str) -> set[int]:
+        matches = list(_TABLE_RE.finditer(original))
+        adjacent: set[int] = set()
+        for idx in range(1, len(matches)):
+            between = original[matches[idx - 1].end() : matches[idx].start()]
+            if between.strip() == "":
+                adjacent.add(idx)
+        return adjacent
+
+    def _row_key(self, row) -> tuple[str, ...]:
+        cells = row.find_all(["td", "th"])
+        return tuple(cell.get_text(strip=True) for cell in cells)
