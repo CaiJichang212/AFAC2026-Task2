@@ -139,6 +139,85 @@ def test_long_chunks_use_content_box_with_crop_margin(tmp_path):
     assert chunks[0].bbox[2] == 924
 
 
+def test_table_overlap_included_in_pixel_budget(tmp_path):
+    image_path = tmp_path / "table_budget.jpg"
+    Image.new("RGB", (6000, 4200), "white").save(image_path)
+    profile = _profile(image_path, 6000, 4200, "table_page")
+    hints = LayoutHints((0, 0, 6000, 4200), [], [], 0.5, 1)
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 6_000_000,
+            "full_page_max_pixels": 1_000_000,
+            "horizontal_overlap": 160,
+            "vertical_overlap": 220,
+        }
+    })
+
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) > 1
+    assert all(c.chunk_pixels <= 6_000_000 for c in chunks)
+
+
+def test_last_row_col_overlap_metadata(tmp_path):
+    image_path = tmp_path / "table_lastrc.jpg"
+    Image.new("RGB", (6000, 4200), "white").save(image_path)
+    profile = _profile(image_path, 6000, 4200, "table_page")
+    hints = LayoutHints((0, 0, 6000, 4200), [], [], 0.5, 1)
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 6_000_000,
+            "full_page_max_pixels": 1_000_000,
+            "horizontal_overlap": 160,
+            "vertical_overlap": 220,
+        }
+    })
+
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    for chunk in chunks:
+        if chunk.is_last_col:
+            assert chunk.overlap["right"] == 0
+        if chunk.is_last_row:
+            assert chunk.overlap["bottom"] == 0
+        if not chunk.is_last_col:
+            assert chunk.overlap["right"] > 0
+        if not chunk.is_last_row:
+            assert chunk.overlap["bottom"] > 0
+
+
+def test_table_cut_adjusts_to_blank_band(tmp_path):
+    image_path = tmp_path / "table_band.jpg"
+    Image.new("RGB", (6000, 4200), "white").save(image_path)
+    profile = _profile(image_path, 6000, 4200, "table_page")
+    hints = LayoutHints(
+        (0, 0, 6000, 4200),
+        [(2080, 2160)],
+        [(2980, 3060)],
+        0.5,
+        1,
+    )
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 8_000_000,
+            "full_page_max_pixels": 1_000_000,
+            "horizontal_overlap": 160,
+            "vertical_overlap": 220,
+            "cut_search_px": 260,
+        }
+    })
+
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert any(c.cut_source == "blank_band" for c in chunks)
+    for c in chunks:
+        assert c.bbox[0] >= 0 and c.bbox[2] <= 6000
+        assert c.bbox[1] >= 0 and c.bbox[3] <= 4200
+
+
 def test_long_cut_adjusts_to_horizontal_blank_band(tmp_path):
     image_path = tmp_path / "long_blank_band.jpg"
     Image.new("RGB", (1500, 8000), "white").save(image_path)

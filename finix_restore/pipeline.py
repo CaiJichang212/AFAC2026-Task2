@@ -181,9 +181,13 @@ class Pipeline:
                 self.config.paths.chunks_dir,
                 config=self.config.chunk,
             )
+        elif profile.doc_type == "table_page":
+            chunker = TableGridChunker(
+                self.config.paths.chunks_dir,
+                config=self.config.chunk,
+            )
         else:
-            cls = TableGridChunker if profile.doc_type == "table_page" else PageChunker
-            chunker = cls(
+            chunker = PageChunker(
                 self.config.paths.chunks_dir,
                 max_chunk_pixels=int(chunk_cfg.get("max_chunk_pixels", 12_000_000)),
                 full_page_max_pixels=int(chunk_cfg.get("table_full_page_max_pixels", 16_000_000)),

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from finix_restore.chunk_config import ChunkConfig, LongChunkConfig
+from finix_restore.chunk_config import ChunkConfig, LongChunkConfig, TableChunkConfig
 from finix_restore.chunk_geometry import box_pixels, expand_box, nearest_band_center, overlap_dict
 from finix_restore.models import Chunk, ImageProfile, LayoutHints
 
@@ -212,57 +212,268 @@ class TableGridChunker:
     def __init__(
         self,
         chunks_dir: Path,
+        config: ChunkConfig | None = None,
         max_chunk_pixels: int = 12_000_000,
         full_page_max_pixels: int = 16_000_000,
         horizontal_overlap: int = 160,
         vertical_overlap: int = 220,
     ) -> None:
         self.chunks_dir = Path(chunks_dir)
-        self.max_chunk_pixels = max_chunk_pixels
-        self.full_page_max_pixels = full_page_max_pixels
-        self.horizontal_overlap = horizontal_overlap
-        self.vertical_overlap = vertical_overlap
+        if config is None:
+            config = ChunkConfig(
+                table=TableChunkConfig(
+                    target_pixels=max_chunk_pixels,
+                    safe_max_pixels=max_chunk_pixels,
+                    full_page_max_pixels=full_page_max_pixels,
+                    horizontal_overlap=horizontal_overlap,
+                    vertical_overlap=vertical_overlap,
+                )
+            )
+        self.config = config
+        self.table_cfg = config.table
+        # Legacy attribute names retained for any caller that still reads them.
+        self.max_chunk_pixels = self.table_cfg.target_pixels
+        self.full_page_max_pixels = self.table_cfg.full_page_max_pixels
+        self.horizontal_overlap = self.table_cfg.horizontal_overlap
+        self.vertical_overlap = self.table_cfg.vertical_overlap
 
     def chunk(self, profile: ImageProfile, hints: LayoutHints) -> list[Chunk]:
-        if profile.pixels <= self.full_page_max_pixels:
-            boxes = [(0, 0, profile.width, profile.height, 0, 0)]
-            rows, cols = 1, 1
-            cut_source = "full_page"
-        else:
-            cols = max(1, math.ceil(math.sqrt(profile.pixels / self.max_chunk_pixels)))
-            rows = max(1, math.ceil(profile.pixels / (cols * self.max_chunk_pixels)))
-            boxes = []
-            for row in range(rows):
-                base_y0 = row * profile.height // rows
-                base_y1 = (row + 1) * profile.height // rows
-                for col in range(cols):
-                    base_x0 = col * profile.width // cols
-                    base_x1 = (col + 1) * profile.width // cols
-                    x0 = max(0, base_x0 - (self.horizontal_overlap if col else 0))
-                    x1 = min(profile.width, base_x1 + (self.horizontal_overlap if col < cols - 1 else 0))
-                    y0 = max(0, base_y0 - (self.vertical_overlap if row else 0))
-                    y1 = min(profile.height, base_y1 + (self.vertical_overlap if row < rows - 1 else 0))
-                    boxes.append((x0, y0, x1, y1, row, col))
-            cut_source = "grid"
-        return self._materialize(profile, boxes, rows=rows, cols=cols, cut_source=cut_source)
+        content_box = self._resolve_content_box(profile, hints)
+        cx0, cy0, cx1, cy1 = content_box
+        content_width = max(1, cx1 - cx0)
+        content_height = max(1, cy1 - cy0)
+        content_pixels = content_width * content_height
+
+        table_cfg = self.table_cfg
+
+        if content_pixels <= table_cfg.full_page_max_pixels:
+            entries = [
+                {
+                    "bbox": content_box,
+                    "row": 0,
+                    "col": 0,
+                    "rows": 1,
+                    "cols": 1,
+                    "cut_source": "full_page",
+                    "horizontal_overlap": 0,
+                    "vertical_overlap": 0,
+                }
+            ]
+            return self._materialize(profile, content_box=content_box, entries=entries)
+
+        overlap_x = table_cfg.horizontal_overlap
+        overlap_y = table_cfg.vertical_overlap
+
+        rows, cols = self._estimate_grid_shape(
+            width=content_width,
+            height=content_height,
+            target_pixels=max(1, table_cfg.target_pixels),
+            safe_max_pixels=max(1, table_cfg.safe_max_pixels),
+            hard_max_pixels=max(1, self.config.hard_max_pixels),
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+        )
+
+        # Build base grid cuts inside content_box (inclusive endpoints).
+        base_x_cuts = [cx0 + (i * content_width) // cols for i in range(cols)] + [cx1]
+        base_y_cuts = [cy0 + (i * content_height) // rows for i in range(rows)] + [cy1]
+
+        x_cuts, x_from_band = self._adjust_cuts(
+            base_x_cuts,
+            hints.vertical_blank_bands,
+            table_cfg.cut_search_px,
+        )
+        y_cuts, y_from_band = self._adjust_cuts(
+            base_y_cuts,
+            hints.horizontal_blank_bands,
+            table_cfg.cut_search_px,
+        )
+
+        entries: list[dict] = []
+        for row in range(rows):
+            base_y0 = y_cuts[row]
+            base_y1 = y_cuts[row + 1]
+            top_band = y_from_band[row]
+            bottom_band = y_from_band[row + 1]
+            for col in range(cols):
+                base_x0 = x_cuts[col]
+                base_x1 = x_cuts[col + 1]
+                left_band = x_from_band[col]
+                right_band = x_from_band[col + 1]
+
+                x0 = max(cx0, base_x0 - (overlap_x if col > 0 else 0))
+                x1 = min(cx1, base_x1 + (overlap_x if col < cols - 1 else 0))
+                y0 = max(cy0, base_y0 - (overlap_y if row > 0 else 0))
+                y1 = min(cy1, base_y1 + (overlap_y if row < rows - 1 else 0))
+                if x1 <= x0:
+                    x1 = min(cx1, x0 + 1)
+                if y1 <= y0:
+                    y1 = min(cy1, y0 + 1)
+
+                cell_uses_band = any(
+                    (
+                        col > 0 and left_band,
+                        col < cols - 1 and right_band,
+                        row > 0 and top_band,
+                        row < rows - 1 and bottom_band,
+                    )
+                )
+                cut_source = "blank_band" if cell_uses_band else "grid"
+
+                entries.append(
+                    {
+                        "bbox": (x0, y0, x1, y1),
+                        "row": row,
+                        "col": col,
+                        "rows": rows,
+                        "cols": cols,
+                        "cut_source": cut_source,
+                        "horizontal_overlap": overlap_x,
+                        "vertical_overlap": overlap_y,
+                    }
+                )
+
+        return self._materialize(profile, content_box=content_box, entries=entries)
+
+    def _resolve_content_box(
+        self,
+        profile: ImageProfile,
+        hints: LayoutHints,
+    ) -> tuple[int, int, int, int]:
+        crop = hints.crop_box if hints.crop_box else (0, 0, profile.width, profile.height)
+        expanded = expand_box(crop, self.config.crop_margin_px, profile.width, profile.height)
+        x0, y0, x1, y1 = expanded
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            return (0, 0, profile.width, profile.height)
+        return expanded
+
+    @staticmethod
+    def _estimate_grid_shape(
+        width: int,
+        height: int,
+        target_pixels: int,
+        safe_max_pixels: int,
+        hard_max_pixels: int,
+        overlap_x: int,
+        overlap_y: int,
+    ) -> tuple[int, int]:
+        area = max(1, width * height)
+        cols = max(1, math.ceil(math.sqrt(area / max(1, target_pixels))))
+        rows = max(1, math.ceil(area / (cols * max(1, target_pixels))))
+
+        def worst_chunk_pixels(rows_: int, cols_: int) -> int:
+            base_w = math.ceil(width / cols_)
+            base_h = math.ceil(height / rows_)
+            # Interior cells get overlap on both sides; use it as the worst case.
+            extra_w = (2 * overlap_x) if cols_ > 2 else (overlap_x if cols_ > 1 else 0)
+            extra_h = (2 * overlap_y) if rows_ > 2 else (overlap_y if rows_ > 1 else 0)
+            max_w = base_w + extra_w
+            max_h = base_h + extra_h
+            return max_w * max_h
+
+        max_iter = 50
+        # First, ensure we are below safe_max_pixels.
+        for _ in range(max_iter):
+            if worst_chunk_pixels(rows, cols) <= safe_max_pixels:
+                break
+            base_w = math.ceil(width / cols)
+            base_h = math.ceil(height / rows)
+            if base_w >= base_h:
+                cols += 1
+            else:
+                rows += 1
+
+        # Then, ensure we are below hard_max_pixels (must succeed).
+        for _ in range(max_iter):
+            if worst_chunk_pixels(rows, cols) <= hard_max_pixels:
+                break
+            base_w = math.ceil(width / cols)
+            base_h = math.ceil(height / rows)
+            if base_w >= base_h:
+                cols += 1
+            else:
+                rows += 1
+
+        return rows, cols
+
+    @staticmethod
+    def _adjust_cuts(
+        base_cuts: list[int],
+        bands: list[tuple[int, int]],
+        search_px: int,
+    ) -> tuple[list[int], list[bool]]:
+        # Endpoints stay fixed and are never marked as blank_band.
+        if len(base_cuts) <= 2:
+            return list(base_cuts), [False] * len(base_cuts)
+
+        adjusted: list[int] = [base_cuts[0]]
+        from_band: list[bool] = [False]
+        for i in range(1, len(base_cuts) - 1):
+            target = base_cuts[i]
+            new_value, source = nearest_band_center(target, bands, search_px)
+            prev = adjusted[-1]
+            # Look ahead at the next fixed cut as an upper bound to keep monotonic.
+            upper = base_cuts[i + 1]
+            if source == "blank_band" and prev < new_value < upper:
+                adjusted.append(new_value)
+                from_band.append(True)
+            else:
+                adjusted.append(target)
+                from_band.append(False)
+        adjusted.append(base_cuts[-1])
+        from_band.append(False)
+        return adjusted, from_band
 
     def _materialize(
         self,
         profile: ImageProfile,
-        boxes: list[tuple[int, int, int, int, int, int]],
-        rows: int,
-        cols: int,
-        cut_source: str,
+        content_box: tuple[int, int, int, int],
+        entries: list[dict],
     ) -> list[Chunk]:
         stem_dir = self.chunks_dir / Path(profile.file_name).stem
         stem_dir.mkdir(parents=True, exist_ok=True)
         image_sha1 = _file_sha1(profile.path)
         chunks: list[Chunk] = []
-        for x0, y0, x1, y1, row, col in boxes:
-            bbox = (x0, y0, x1, y1)
+
+        safe_max = self.table_cfg.safe_max_pixels
+        hard_max = self.config.hard_max_pixels
+
+        for entry in entries:
+            bbox = entry["bbox"]
+            row = entry["row"]
+            col = entry["col"]
+            rows = entry["rows"]
+            cols = entry["cols"]
+            cut_source = entry["cut_source"]
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
             out_path = stem_dir / f"{cid}.jpg"
             _save_crop(profile.path, bbox, out_path)
+
+            ovl = overlap_dict(
+                row=row,
+                col=col,
+                rows=rows,
+                cols=cols,
+                horizontal=entry["horizontal_overlap"],
+                vertical=entry["vertical_overlap"],
+            )
+
+            chunk_pixels = box_pixels(bbox)
+
+            flags: list[str] = []
+            if chunk_pixels > safe_max:
+                flags.append("over_safe_pixels")
+            if chunk_pixels > hard_max:
+                flags.append("over_hard_pixels")
+            if cut_source == "grid" and (rows > 1 or cols > 1):
+                flags.append("fixed_cut")
+            seen: set[str] = set()
+            unique_flags: list[str] = []
+            for f in flags:
+                if f not in seen:
+                    seen.add(f)
+                    unique_flags.append(f)
+
             chunks.append(
                 Chunk(
                     chunk_id=cid,
@@ -271,25 +482,21 @@ class TableGridChunker:
                     bbox=bbox,
                     row=row,
                     col=col,
-                    overlap={
-                        "left": self.horizontal_overlap if col else 0,
-                        "right": self.horizontal_overlap,
-                        "top": self.vertical_overlap if row else 0,
-                        "bottom": self.vertical_overlap,
-                    },
+                    overlap=ovl,
                     image_sha1=image_sha1,
-                    chunk_pixels=box_pixels(bbox),
+                    chunk_pixels=chunk_pixels,
                     is_last_row=row == rows - 1,
                     is_last_col=col == cols - 1,
                     cut_source=cut_source,
-                    risk_flags=(),
+                    risk_flags=tuple(unique_flags),
                 )
             )
+
         _write_manifest(
             stem_dir,
             profile,
             chunks,
-            content_box=(0, 0, profile.width, profile.height),
+            content_box=content_box,
             chunk_policy="table_grid_v2",
         )
         return chunks
