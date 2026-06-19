@@ -10,8 +10,8 @@
 python -m finix_restore.cli \
   --input_dir "data/AFAC A榜评测数据集/finix_huge_long_rest_A/images" \
   --input_dir "data/AFAC A榜评测数据集/finix_huge_table_rest_A/images" \
-  --work_dir outputs/run_A_2 \
-  --output_csv outputs/run_A_2/submission_A_2.csv \
+  --work_dir outputs/run_A_2_img-chunk-opt \
+  --output_csv outputs/run_A_2_img-chunk-opt/submission_A_2_img-chunk-opt.csv \
   --limit_per_dir 2
 
 # # 只跑长图数据集（50张）

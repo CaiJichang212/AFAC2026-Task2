@@ -1,3 +1,6 @@
+# Table chunk budget experiment - 6M (baseline, equals current default).
+# Self-contained config: load_config() reads only this file, so all top-level
+# sections (api/merge/quality) must be present.
 api:
   url: "${FINIX_API_URL}"
   timeout_seconds: 360
@@ -17,8 +20,8 @@ chunk:
     vertical_overlap: 320
     blank_band_search_px: 360
   table:
-    target_pixels: 5000000
-    safe_max_pixels: 7000000
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
     full_page_max_pixels: 8000000
     horizontal_overlap: 160
     vertical_overlap: 220

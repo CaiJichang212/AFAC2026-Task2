@@ -94,7 +94,8 @@ def test_default_table_config_splits_15m_pixel_pages_for_api_stability():
 
     assert chunk["hard_max_pixels"] == 16_777_216
     assert chunk["table"]["full_page_max_pixels"] <= 8_000_000
-    assert chunk["table"]["target_pixels"] == 6_000_000
+    assert chunk["table"]["target_pixels"] == 5_000_000
+    assert chunk["table"]["safe_max_pixels"] == 7_000_000
 
 
 def test_long_dynamic_height_respects_safe_max_pixels(tmp_path):

@@ -1,3 +1,4 @@
+# Table chunk budget experiment - 5M (target_pixels lowered, safe trimmed).
 api:
   url: "${FINIX_API_URL}"
   timeout_seconds: 360
