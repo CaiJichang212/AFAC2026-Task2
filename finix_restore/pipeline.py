@@ -179,8 +179,7 @@ class Pipeline:
         if profile.doc_type == "long_strip":
             chunker = LongStripChunker(
                 self.config.paths.chunks_dir,
-                window_height=int(chunk_cfg.get("long_window_height", 4000)),
-                overlap=int(chunk_cfg.get("long_vertical_overlap", 320)),
+                config=self.config.chunk,
             )
         else:
             cls = TableGridChunker if profile.doc_type == "table_page" else PageChunker

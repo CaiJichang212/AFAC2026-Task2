@@ -8,7 +8,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from finix_restore.chunk_geometry import box_pixels
+from finix_restore.chunk_config import ChunkConfig, LongChunkConfig
+from finix_restore.chunk_geometry import box_pixels, expand_box, nearest_band_center, overlap_dict
 from finix_restore.models import Chunk, ImageProfile, LayoutHints
 
 
@@ -60,31 +61,113 @@ def _save_crop(source: Path, bbox: tuple[int, int, int, int], out_path: Path) ->
 
 
 class LongStripChunker:
-    def __init__(self, chunks_dir: Path, window_height: int = 4000, overlap: int = 320) -> None:
+    def __init__(
+        self,
+        chunks_dir: Path,
+        config: ChunkConfig | None = None,
+        window_height: int = 4000,
+        overlap: int = 320,
+    ) -> None:
         self.chunks_dir = Path(chunks_dir)
-        self.window_height = window_height
-        self.overlap = overlap
+        if config is None:
+            config = ChunkConfig(
+                long=LongChunkConfig(
+                    max_window_height=window_height,
+                    vertical_overlap=overlap,
+                )
+            )
+        self.config = config
+        self.long_cfg = config.long
 
     def chunk(self, profile: ImageProfile, hints: LayoutHints) -> list[Chunk]:
         stem_dir = self.chunks_dir / Path(profile.file_name).stem
         stem_dir.mkdir(parents=True, exist_ok=True)
         image_sha1 = _file_sha1(profile.path)
-        chunks: list[Chunk] = []
-        y0 = 0
-        row = 0
-        while y0 < profile.height:
-            y1 = min(profile.height, y0 + self.window_height)
-            cut_source = "dynamic_window"
-            if y1 < profile.height:
-                adjusted_y1 = self._adjust_to_blank_band(y1, hints.horizontal_blank_bands)
-                if adjusted_y1 != y1:
+
+        content_box = self._resolve_content_box(profile, hints)
+        cx0, cy0, cx1, cy1 = content_box
+        content_width = max(1, cx1 - cx0)
+
+        long_cfg = self.long_cfg
+        target_h = max(1, long_cfg.target_pixels // content_width)
+        safe_h = max(1, long_cfg.safe_max_pixels // content_width)
+        window_h = min(
+            long_cfg.max_window_height,
+            max(long_cfg.min_window_height, target_h),
+            safe_h,
+        )
+        window_h = max(1, window_h)
+        v_overlap = long_cfg.vertical_overlap
+
+        # First pass: pick (y0, y1, cut_source) tuples covering content vertically.
+        slices: list[tuple[int, int, str]] = []
+        y0 = cy0
+        guard = 0
+        while y0 < cy1:
+            guard += 1
+            if guard > 10000:
+                raise RuntimeError("LongStripChunker exceeded slice iteration guard")
+            target_y1 = min(cy1, y0 + window_h)
+            is_last = target_y1 >= cy1
+            if is_last:
+                y1 = cy1
+                cut_source = "dynamic_window"
+            else:
+                adjusted, source = nearest_band_center(
+                    target_y1,
+                    hints.horizontal_blank_bands,
+                    long_cfg.blank_band_search_px,
+                )
+                if source == "blank_band" and adjusted > y0:
+                    y1 = min(cy1, max(y0 + 1, adjusted))
                     cut_source = "blank_band"
-                y1 = adjusted_y1
-            bbox = (0, y0, profile.width, y1)
+                else:
+                    y1 = target_y1
+                    cut_source = "dynamic_window"
+            if y1 <= y0:
+                y1 = min(cy1, y0 + 1)
+            slices.append((y0, y1, cut_source))
+            if y1 >= cy1:
+                break
+            next_y0 = y1 - v_overlap if v_overlap else y1
+            if next_y0 <= y0:
+                next_y0 = y0 + 1
+            y0 = next_y0
+
+        rows = len(slices)
+        chunks: list[Chunk] = []
+        for row, (y0, y1, cut_source) in enumerate(slices):
+            is_last_row = row == rows - 1
+            bbox = (cx0, y0, cx1, y1)
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
             out_path = stem_dir / f"{cid}.jpg"
             _save_crop(profile.path, bbox, out_path)
-            is_last_row = y1 >= profile.height
+
+            ovl = overlap_dict(
+                row=row,
+                col=0,
+                rows=rows,
+                cols=1,
+                horizontal=0,
+                vertical=v_overlap,
+            )
+
+            chunk_pixels = box_pixels(bbox)
+            flags: list[str] = []
+            if chunk_pixels > long_cfg.safe_max_pixels:
+                flags.append("over_safe_pixels")
+            if chunk_pixels > self.config.hard_max_pixels:
+                flags.append("over_hard_pixels")
+            if not is_last_row and cut_source != "blank_band":
+                flags.append("fixed_cut")
+            # de-duplicate while preserving order
+            seen: set[str] = set()
+            unique_flags: list[str] = []
+            for f in flags:
+                if f not in seen:
+                    seen.add(f)
+                    unique_flags.append(f)
+
             chunks.append(
                 Chunk(
                     chunk_id=cid,
@@ -93,34 +176,36 @@ class LongStripChunker:
                     bbox=bbox,
                     row=row,
                     col=0,
-                    overlap={"top": self.overlap if y0 else 0, "bottom": self.overlap if y1 < profile.height else 0},
+                    overlap=ovl,
                     image_sha1=image_sha1,
-                    chunk_pixels=box_pixels(bbox),
+                    chunk_pixels=chunk_pixels,
                     is_last_row=is_last_row,
                     is_last_col=True,
                     cut_source=cut_source,
-                    risk_flags=(),
+                    risk_flags=tuple(unique_flags),
                 )
             )
-            if y1 >= profile.height:
-                break
-            y0 = max(y1 - self.overlap, y0 + 1)
-            row += 1
+
         _write_manifest(
             stem_dir,
             profile,
             chunks,
-            content_box=(0, 0, profile.width, profile.height),
+            content_box=content_box,
             chunk_policy="long_dynamic_v1",
         )
         return chunks
 
-    def _adjust_to_blank_band(self, y: int, bands: list[tuple[int, int]]) -> int:
-        candidates = [band for band in bands if abs(((band[0] + band[1]) // 2) - y) <= self.overlap]
-        if not candidates:
-            return y
-        band = min(candidates, key=lambda b: abs(((b[0] + b[1]) // 2) - y))
-        return max(1, (band[0] + band[1]) // 2)
+    def _resolve_content_box(
+        self,
+        profile: ImageProfile,
+        hints: LayoutHints,
+    ) -> tuple[int, int, int, int]:
+        crop = hints.crop_box if hints.crop_box else (0, 0, profile.width, profile.height)
+        expanded = expand_box(crop, self.config.crop_margin_px, profile.width, profile.height)
+        x0, y0, x1, y1 = expanded
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            return (0, 0, profile.width, profile.height)
+        return expanded
 
 
 class TableGridChunker:

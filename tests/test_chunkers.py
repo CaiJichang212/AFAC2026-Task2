@@ -3,6 +3,7 @@ import json
 import yaml
 from PIL import Image
 
+from finix_restore.chunk_config import ChunkConfig
 from finix_restore.chunkers import LongStripChunker, TableGridChunker
 from finix_restore.layout_sentry import LayoutHints
 from finix_restore.models import ImageProfile
@@ -93,3 +94,67 @@ def test_default_table_config_splits_15m_pixel_pages_for_api_stability():
     assert chunk["hard_max_pixels"] == 16_777_216
     assert chunk["table"]["full_page_max_pixels"] <= 8_000_000
     assert chunk["table"]["target_pixels"] == 6_000_000
+
+
+def test_long_dynamic_height_respects_safe_max_pixels(tmp_path):
+    image_path = tmp_path / "wide_long.jpg"
+    Image.new("RGB", (5000, 12000), "white").save(image_path)
+    profile = _profile(image_path, 5000, 12000, "long_strip")
+    hints = LayoutHints((0, 0, 5000, 12000), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "long": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 8_000_000,
+            "max_window_height": 4000,
+            "min_window_height": 1200,
+            "vertical_overlap": 320,
+            "blank_band_search_px": 360,
+        }
+    })
+    chunks = LongStripChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert all(c.chunk_pixels <= 8_000_000 for c in chunks)
+    assert max(c.bbox[3] - c.bbox[1] for c in chunks) <= 1600
+
+
+def test_long_chunks_use_content_box_with_crop_margin(tmp_path):
+    image_path = tmp_path / "long_with_margin.jpg"
+    Image.new("RGB", (1000, 1000), "white").save(image_path)
+    profile = _profile(image_path, 1000, 1000, "long_strip")
+    hints = LayoutHints((100, 200, 900, 800), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "crop_margin_px": 24,
+        "long": {
+            "target_pixels": 1_000_000,
+            "max_window_height": 800,
+            "min_window_height": 200,
+            "vertical_overlap": 0,
+        },
+    })
+    chunks = LongStripChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+    manifest = json.loads((tmp_path / "chunks" / "long_with_margin" / "manifest.json").read_text())
+
+    assert manifest["content_box"] == [76, 176, 924, 824]
+    assert chunks[0].bbox[0] == 76
+    assert chunks[0].bbox[2] == 924
+
+
+def test_long_cut_adjusts_to_horizontal_blank_band(tmp_path):
+    image_path = tmp_path / "long_blank_band.jpg"
+    Image.new("RGB", (1500, 8000), "white").save(image_path)
+    profile = _profile(image_path, 1500, 8000, "long_strip")
+    hints = LayoutHints((0, 0, 1500, 8000), [(3150, 3230)], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "long": {
+            "target_pixels": 4_800_000,
+            "safe_max_pixels": 9_000_000,
+            "max_window_height": 4000,
+            "min_window_height": 1500,
+            "vertical_overlap": 320,
+            "blank_band_search_px": 360,
+        }
+    })
+    chunks = LongStripChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert chunks[0].bbox[3] == 3190
+    assert chunks[0].cut_source == "blank_band"
