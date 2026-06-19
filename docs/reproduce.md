@@ -64,6 +64,14 @@ bash run.sh \
 - `outputs/A/qc/`：单文件质检 JSON。
 - `outputs/A/logs/`：运行日志和脱敏配置快照。
 
+## 并发参数建议
+
+- `runtime.image_concurrency` 控制同时处理的图片数量。
+- `api.concurrency` 控制全局 FinixDoc-VL 请求数量上限。
+- `api.per_user_concurrency` 控制单个 userId 的请求数量上限。
+
+保守起步建议使用 `image_concurrency=2`、`api.concurrency=4`、`per_user_concurrency=1`。如果 `qc/summary.json` 中出现 `service_busy_html`、`api_failure_ratio_high` 或超时增多，先把 `image_concurrency` 降回 1，再降低 `api.concurrency`。
+
 ## 5. B 榜运行命令
 
 B 榜目录发布后，替换输入目录即可，命令结构保持一致：

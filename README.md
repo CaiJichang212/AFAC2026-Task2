@@ -83,6 +83,7 @@ python -m finix_restore.cli \
 | `--no-resume` | 忽略缓存强制重跑 | - |
 | `--force-api` | 强制调用 API 忽略缓存 | - |
 | `--dry-run` | 仅分块不调用 API | - |
+| `--image_concurrency` | 同时处理的图片数量；API 总请求并发仍由 `api.concurrency` 统一限制 | 配置文件中的 `runtime.image_concurrency` |
 
 ### 配置文件示例（configs/default.yaml）
 
@@ -92,6 +93,9 @@ api:
   max_retries: 3
   concurrency: 4
   per_user_concurrency: 1
+
+runtime:
+  image_concurrency: 2
 
 chunk:
   long_window_height: 4000
@@ -110,6 +114,8 @@ quality:
   max_duplication_ratio: 0.18
   max_api_failure_ratio: 0.20
 ```
+
+> `api.concurrency` 表示全局 FinixDoc-VL 请求上限，`api.per_user_concurrency` 表示单个 userId 的请求上限。建议先使用 `image_concurrency=2`、`api.concurrency=4`、`per_user_concurrency=1` 压测，确认无超时或服务繁忙后再调高。
 
 ### 输出目录结构
 
