@@ -183,6 +183,31 @@ def test_http_200_service_busy_html_is_retryable_and_not_cached(tmp_path):
     assert "secret-key" not in log_text
 
 
+def test_http_200_service_busy_html_fragment_is_retryable_and_not_cached(tmp_path):
+    from finix_restore.finix_api import FinixApiClient, FinixApiError
+
+    paths = RunPaths.from_work_dir(tmp_path / "work")
+    html_fragment = (
+        "<div class='wait-tit'>顾客太多，客官请稍候</div>"
+        "<a id='J_retry_link'>重试</a><script>showTextWait()</script>"
+    )
+    session = FakeSession([FakeResponse(200, html_fragment)])
+    client = FinixApiClient(
+        api_key="secret-key",
+        user_ids=["finixA1001"],
+        api_url="https://example.test/api",
+        paths=paths,
+        max_retries=0,
+        session=session,
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(FinixApiError, match="failed after retries"):
+        client.parse_chunk(_chunk(tmp_path))
+
+    assert not (paths.api_raw_dir / "doc" / "chunk-a.md").exists()
+
+
 def test_html_table_fragment_is_valid_markdown_response(tmp_path):
     from finix_restore.finix_api import FinixApiClient
 

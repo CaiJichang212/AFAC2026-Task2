@@ -73,6 +73,35 @@ def test_pipeline_blocks_submission_when_file_qc_fails(tmp_path, monkeypatch):
     assert summary["risk_counts"]["full_html_page"] == 1
 
 
+def test_pipeline_removes_stale_submission_when_quality_fails(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline, PipelineError
+
+    class EmptyClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse_chunks(self, chunks, force_api=False):
+            return [
+                ChunkText(chunk=chunk, markdown="", block_type="unknown", source="api")
+                for chunk in chunks
+            ], len(chunks)
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (120, 240), "white").save(input_dir / "failed.png")
+    output_csv = tmp_path / "submission.csv"
+    output_csv.write_text("file_name,ground_truth\nold.png,stale\n", encoding="utf-8")
+    config = _config(tmp_path, [input_dir], output_csv)
+    config.quality["max_reruns_per_file"] = 0
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", EmptyClient)
+
+    with pytest.raises(PipelineError, match="quality gate failed"):
+        Pipeline(config).run()
+
+    assert not output_csv.exists()
+
+
 def test_pipeline_reruns_once_after_retryable_quality_failure(tmp_path, monkeypatch):
     from finix_restore.models import ChunkText
     from finix_restore.pipeline import Pipeline
@@ -119,6 +148,43 @@ def test_pipeline_reruns_once_after_retryable_quality_failure(tmp_path, monkeypa
     summary = json.loads((config.paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["passed"] is True
     assert summary["files"][0]["rerun_count"] == 1
+
+
+def test_pipeline_rerun_applies_retry_planner_concurrency(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline
+
+    class RetryConcurrencyClient:
+        init_concurrency = []
+        calls = 0
+
+        def __init__(self, **kwargs):
+            self.init_concurrency.append(kwargs["concurrency"])
+
+        def parse_chunks(self, chunks, force_api=False):
+            RetryConcurrencyClient.calls += 1
+            if RetryConcurrencyClient.calls == 1:
+                return [
+                    ChunkText(chunk=chunk, markdown="", block_type="unknown", source="api")
+                    for chunk in chunks
+                ], len(chunks)
+            return [
+                ChunkText(chunk=chunk, markdown="# ok", block_type="body", source="api")
+                for chunk in chunks
+            ], 0
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (120, 240), "white").save(input_dir / "serial-rerun.png")
+    config = _config(tmp_path, [input_dir], tmp_path / "submission.csv")
+    config.api["concurrency"] = 4
+    config.quality["max_reruns_per_file"] = 1
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", RetryConcurrencyClient)
+
+    report = Pipeline(config).run()
+
+    assert report.passed
+    assert RetryConcurrencyClient.init_concurrency == [4, 1]
 
 
 def test_pipeline_resume_hits_merged_cache_still_records_qc_metric(tmp_path):

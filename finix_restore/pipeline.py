@@ -49,6 +49,7 @@ class Pipeline:
 
     def run(self) -> QualityReport:
         self._write_config_snapshot()
+        self._remove_stale_output_csv()
         input_report = self.quality_gate.validate_input_files(self.config.input_dirs)
         if not input_report.passed:
             raise PipelineError(",".join(input_report.risks))
@@ -105,8 +106,14 @@ class Pipeline:
 
         rerun_count = 0
         force_api = self.config.force_api
+        concurrency_override: int | None = None
         while True:
-            markdown, failed_chunks = self._process_image_once(chunks, profile, force_api=force_api)
+            markdown, failed_chunks = self._process_image_once(
+                chunks,
+                profile,
+                force_api=force_api,
+                concurrency_override=concurrency_override,
+            )
             quality = self.quality_gate.check_file(
                 profile.file_name,
                 markdown,
@@ -124,9 +131,21 @@ class Pipeline:
                 )
             rerun_count += 1
             force_api = bool(plan["force_api"])
+            planned_concurrency = int(plan["concurrency"])
+            concurrency_override = planned_concurrency if planned_concurrency > 0 else None
 
-    def _process_image_once(self, chunks, profile: ImageProfile, force_api: bool = False) -> tuple[str, int]:
-        chunk_texts, failed_chunks = self._parse_chunks(chunks, force_api=force_api)
+    def _process_image_once(
+        self,
+        chunks,
+        profile: ImageProfile,
+        force_api: bool = False,
+        concurrency_override: int | None = None,
+    ) -> tuple[str, int]:
+        chunk_texts, failed_chunks = self._parse_chunks(
+            chunks,
+            force_api=force_api,
+            concurrency_override=concurrency_override,
+        )
         normalized = self.normalizer.batch(chunk_texts)
         self._write_normalized(profile.file_name, normalized)
         ordered = self.order_resolver.resolve(normalized, doc_type=profile.doc_type)
@@ -136,7 +155,12 @@ class Pipeline:
         self._write_merged(profile.file_name, markdown)
         return markdown, failed_chunks
 
-    def _parse_chunks(self, chunks, force_api: bool = False) -> tuple[list[ChunkText], int]:
+    def _parse_chunks(
+        self,
+        chunks,
+        force_api: bool = False,
+        concurrency_override: int | None = None,
+    ) -> tuple[list[ChunkText], int]:
         client = FinixApiClient(
             api_key=self.config.api_key,
             user_ids=self.config.user_ids,
@@ -144,7 +168,7 @@ class Pipeline:
             paths=self.config.paths,
             timeout_seconds=int(self.config.api.get("timeout_seconds", 240)),
             max_retries=int(self.config.api.get("max_retries", 3)),
-            concurrency=int(self.config.api.get("concurrency", 1)),
+            concurrency=concurrency_override or int(self.config.api.get("concurrency", 1)),
             per_user_concurrency=int(self.config.api.get("per_user_concurrency", 1)),
             run_id=self.run_id,
         )
@@ -226,3 +250,8 @@ class Pipeline:
         if self.config.limit is not None:
             paths = paths[: self.config.limit]
         return paths
+
+    def _remove_stale_output_csv(self) -> None:
+        if self.config.dry_run:
+            return
+        self.config.output_csv.unlink(missing_ok=True)

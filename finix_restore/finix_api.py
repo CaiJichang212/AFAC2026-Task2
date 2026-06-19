@@ -291,6 +291,10 @@ class FinixApiClient:
         lowered = markdown.strip().lower()
         if not lowered:
             return
+        if any(marker in lowered for marker in _SERVICE_BUSY_HTML_MARKERS):
+            raise FinixApiError("service busy html page")
+        if "alipayobjects.com" in lowered and "<html" in lowered:
+            raise FinixApiError("service busy html page")
         is_full_html = (
             (lowered.startswith("<!doctype html") or lowered.startswith("<html"))
             and "<head" in lowered
@@ -298,10 +302,6 @@ class FinixApiClient:
         )
         if not is_full_html:
             return
-        if any(marker in lowered for marker in _SERVICE_BUSY_HTML_MARKERS):
-            raise FinixApiError("service busy html page")
-        if "alipayobjects.com" in lowered and "<html" in lowered:
-            raise FinixApiError("service busy html page")
         raise FinixApiError("full html page response")
 
     def _sha1(self, markdown: str | None) -> str:

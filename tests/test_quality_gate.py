@@ -103,6 +103,32 @@ def test_quality_gate_flags_service_busy_html_page(tmp_path):
     assert "full_html_page" in qc["risks"]
 
 
+def test_quality_gate_flags_service_busy_html_fragment(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    paths = RunPaths.from_work_dir(tmp_path / "work")
+    gate = QualityGate(paths)
+    markdown = (
+        "<div class='wait-tit'>顾客太多，客官请稍候</div>\n"
+        "<a id='J_retry_link'>重试</a>\n"
+        "<script>showTextWait()</script>"
+    )
+
+    report = gate.check_file(
+        file_name="busy-fragment.png",
+        markdown=markdown,
+        doc_type="normal_page",
+        chunk_count=1,
+        failed_chunks=0,
+    )
+
+    assert not report.passed
+    assert "service_busy_html" in report.risks
+    assert "full_html_page" not in report.risks
+    qc = json.loads((paths.qc_dir / "busy-fragment.json").read_text(encoding="utf-8"))
+    assert "service_busy_html" in qc["risks"]
+
+
 def test_quality_gate_allows_html_table_fragment(tmp_path):
     from finix_restore.quality_gate import QualityGate
 

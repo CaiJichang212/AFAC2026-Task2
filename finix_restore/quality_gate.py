@@ -176,12 +176,12 @@ class QualityGate:
             and "<head" in lowered
             and "<body" in lowered
         )
+        if any(marker in lowered for marker in SERVICE_BUSY_HTML_MARKERS) or (
+            "alipayobjects.com" in lowered and "<html" in lowered
+        ):
+            risks.append("service_busy_html")
         if is_full_html:
             risks.append("full_html_page")
-            if any(marker in lowered for marker in SERVICE_BUSY_HTML_MARKERS) or (
-                "alipayobjects.com" in lowered and "<html" in lowered
-            ):
-                risks.append("service_busy_html")
         return risks
 
     def _write_file_report(self, file_name: str, report: QualityReport) -> None:
