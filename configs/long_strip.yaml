@@ -1,4 +1,6 @@
 chunk:
-  long_window_height: 4000
-  long_vertical_overlap: 320
-  max_chunk_pixels: 12000000
+  long:
+    max_window_height: 4000
+    vertical_overlap: 320
+  table:
+    target_pixels: 12000000

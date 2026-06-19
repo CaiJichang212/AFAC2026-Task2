@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 from dotenv import load_dotenv
 
+from finix_restore.chunk_config import ChunkConfig
 from finix_restore.paths import RunPaths
 
 
@@ -27,7 +28,7 @@ class RunConfig:
     user_ids: list[str]
     api_url: str
     api: dict[str, int | str]
-    chunk: dict[str, int]
+    chunk: ChunkConfig | Mapping[str, Any]
     merge: dict[str, float | int]
     quality: dict[str, float | int]
     resume: bool = True
@@ -36,12 +37,17 @@ class RunConfig:
     limit: int | None = None
     limit_per_dir: int | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.chunk, ChunkConfig):
+            object.__setattr__(self, "chunk", ChunkConfig.from_mapping(self.chunk))
+
     def snapshot(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["input_dirs"] = [str(p) for p in self.input_dirs]
         payload["output_csv"] = str(self.output_csv)
         payload["paths"] = {k: str(v) for k, v in asdict(self.paths).items()}
         payload["api_key"] = "***"
+        payload["chunk"] = self.chunk.to_dict()
         return payload
 
 
@@ -95,7 +101,7 @@ def load_config(args) -> RunConfig:
         user_ids=user_ids,
         api_url=api_url,
         api=api,
-        chunk=dict(raw.get("chunk", {})),
+        chunk=ChunkConfig.from_mapping(raw.get("chunk", {})),
         merge=dict(raw.get("merge", {})),
         quality=dict(raw.get("quality", {})),
         resume=bool(args.resume),

@@ -17,12 +17,27 @@ api:
   concurrency: 8
   per_user_concurrency: 1
 chunk:
-  max_chunk_pixels: 12000000
-  table_full_page_max_pixels: 16000000
-  long_window_height: 4000
-  long_vertical_overlap: 320
-  table_horizontal_overlap: 160
-  table_vertical_overlap: 220
+  hard_max_pixels: 16777216
+  safe_max_pixels: 12000000
+  min_pixels: 4096
+  crop_margin_px: 24
+  long:
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
+    max_window_height: 4000
+    min_window_height: 1800
+    vertical_overlap: 320
+    blank_band_search_px: 360
+  table:
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
+    full_page_max_pixels: 8000000
+    horizontal_overlap: 160
+    vertical_overlap: 220
+    cut_search_px: 260
+  normal:
+    full_page_max_pixels: 12000000
+    target_pixels: 8000000
 merge:
   dedup_window_chars_long: 1200
   dedup_window_chars_table: 600

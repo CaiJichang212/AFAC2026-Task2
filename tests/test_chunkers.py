@@ -75,5 +75,6 @@ def test_default_table_config_splits_15m_pixel_pages_for_api_stability():
     config = yaml.safe_load(open("configs/default.yaml", encoding="utf-8"))
     chunk = config["chunk"]
 
-    assert chunk["table_full_page_max_pixels"] <= 8_000_000
-    assert chunk["max_chunk_pixels"] <= 4_000_000
+    assert chunk["hard_max_pixels"] == 16_777_216
+    assert chunk["table"]["full_page_max_pixels"] <= 8_000_000
+    assert chunk["table"]["target_pixels"] == 6_000_000

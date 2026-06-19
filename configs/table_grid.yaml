@@ -1,5 +1,6 @@
 chunk:
-  max_chunk_pixels: 4000000
-  table_full_page_max_pixels: 8000000
-  table_horizontal_overlap: 160
-  table_vertical_overlap: 220
+  table:
+    target_pixels: 4000000
+    full_page_max_pixels: 8000000
+    horizontal_overlap: 160
+    vertical_overlap: 220
