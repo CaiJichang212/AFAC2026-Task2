@@ -40,6 +40,11 @@ class Chunk:
     col: int
     overlap: dict[str, int]
     image_sha1: str
+    chunk_pixels: int = 0
+    is_last_row: bool = False
+    is_last_col: bool = False
+    cut_source: str = "unknown"
+    risk_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

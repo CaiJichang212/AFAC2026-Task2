@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from finix_restore.chunk_geometry import box_pixels
 from finix_restore.models import Chunk, ImageProfile, LayoutHints
 
 
@@ -24,16 +25,26 @@ def _chunk_id(file_name: str, bbox: tuple[int, int, int, int], image_sha1: str) 
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
-def _write_manifest(stem_dir: Path, profile: ImageProfile, chunks: list[Chunk]) -> None:
+def _write_manifest(
+    stem_dir: Path,
+    profile: ImageProfile,
+    chunks: list[Chunk],
+    content_box: tuple[int, int, int, int],
+    chunk_policy: str,
+) -> None:
     payload = {
         "file_name": profile.file_name,
         "width": profile.width,
         "height": profile.height,
         "doc_type": profile.doc_type,
+        "content_box": list(content_box),
+        "chunk_policy": chunk_policy,
         "chunks": [
             {
                 **asdict(chunk),
                 "image_path": str(chunk.image_path),
+                "bbox": list(chunk.bbox),
+                "risk_flags": list(chunk.risk_flags),
             }
             for chunk in chunks
         ],
@@ -63,12 +74,17 @@ class LongStripChunker:
         row = 0
         while y0 < profile.height:
             y1 = min(profile.height, y0 + self.window_height)
+            cut_source = "dynamic_window"
             if y1 < profile.height:
-                y1 = self._adjust_to_blank_band(y1, hints.horizontal_blank_bands)
+                adjusted_y1 = self._adjust_to_blank_band(y1, hints.horizontal_blank_bands)
+                if adjusted_y1 != y1:
+                    cut_source = "blank_band"
+                y1 = adjusted_y1
             bbox = (0, y0, profile.width, y1)
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
             out_path = stem_dir / f"{cid}.jpg"
             _save_crop(profile.path, bbox, out_path)
+            is_last_row = y1 >= profile.height
             chunks.append(
                 Chunk(
                     chunk_id=cid,
@@ -79,13 +95,24 @@ class LongStripChunker:
                     col=0,
                     overlap={"top": self.overlap if y0 else 0, "bottom": self.overlap if y1 < profile.height else 0},
                     image_sha1=image_sha1,
+                    chunk_pixels=box_pixels(bbox),
+                    is_last_row=is_last_row,
+                    is_last_col=True,
+                    cut_source=cut_source,
+                    risk_flags=(),
                 )
             )
             if y1 >= profile.height:
                 break
             y0 = max(y1 - self.overlap, y0 + 1)
             row += 1
-        _write_manifest(stem_dir, profile, chunks)
+        _write_manifest(
+            stem_dir,
+            profile,
+            chunks,
+            content_box=(0, 0, profile.width, profile.height),
+            chunk_policy="long_dynamic_v1",
+        )
         return chunks
 
     def _adjust_to_blank_band(self, y: int, bands: list[tuple[int, int]]) -> int:
@@ -114,6 +141,8 @@ class TableGridChunker:
     def chunk(self, profile: ImageProfile, hints: LayoutHints) -> list[Chunk]:
         if profile.pixels <= self.full_page_max_pixels:
             boxes = [(0, 0, profile.width, profile.height, 0, 0)]
+            rows, cols = 1, 1
+            cut_source = "full_page"
         else:
             cols = max(1, math.ceil(math.sqrt(profile.pixels / self.max_chunk_pixels)))
             rows = max(1, math.ceil(profile.pixels / (cols * self.max_chunk_pixels)))
@@ -129,9 +158,17 @@ class TableGridChunker:
                     y0 = max(0, base_y0 - (self.vertical_overlap if row else 0))
                     y1 = min(profile.height, base_y1 + (self.vertical_overlap if row < rows - 1 else 0))
                     boxes.append((x0, y0, x1, y1, row, col))
-        return self._materialize(profile, boxes)
+            cut_source = "grid"
+        return self._materialize(profile, boxes, rows=rows, cols=cols, cut_source=cut_source)
 
-    def _materialize(self, profile: ImageProfile, boxes: list[tuple[int, int, int, int, int, int]]) -> list[Chunk]:
+    def _materialize(
+        self,
+        profile: ImageProfile,
+        boxes: list[tuple[int, int, int, int, int, int]],
+        rows: int,
+        cols: int,
+        cut_source: str,
+    ) -> list[Chunk]:
         stem_dir = self.chunks_dir / Path(profile.file_name).stem
         stem_dir.mkdir(parents=True, exist_ok=True)
         image_sha1 = _file_sha1(profile.path)
@@ -156,9 +193,20 @@ class TableGridChunker:
                         "bottom": self.vertical_overlap,
                     },
                     image_sha1=image_sha1,
+                    chunk_pixels=box_pixels(bbox),
+                    is_last_row=row == rows - 1,
+                    is_last_col=col == cols - 1,
+                    cut_source=cut_source,
+                    risk_flags=(),
                 )
             )
-        _write_manifest(stem_dir, profile, chunks)
+        _write_manifest(
+            stem_dir,
+            profile,
+            chunks,
+            content_box=(0, 0, profile.width, profile.height),
+            chunk_policy="table_grid_v2",
+        )
         return chunks
 
 

@@ -46,6 +46,12 @@ def test_long_strip_chunks_cover_height_and_have_stable_ids(tmp_path):
     _assert_cover_height(chunks, 1500, 10000)
     assert [c.chunk_id for c in chunks] == [c.chunk_id for c in chunks_again]
     assert len(manifest["chunks"]) == len(chunks)
+    assert manifest["content_box"] == [0, 0, 1500, 10000]
+    assert manifest["chunk_policy"] == "long_dynamic_v1"
+    first_chunk_payload = manifest["chunks"][0]
+    assert {"chunk_pixels", "is_last_row", "is_last_col", "cut_source", "risk_flags"} <= set(first_chunk_payload)
+    assert isinstance(first_chunk_payload["bbox"], list)
+    assert isinstance(first_chunk_payload["risk_flags"], list)
 
 
 def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
