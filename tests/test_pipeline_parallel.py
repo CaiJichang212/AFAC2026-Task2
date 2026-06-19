@@ -74,3 +74,71 @@ def test_pipeline_processes_images_concurrently_but_writes_csv_in_input_order(tm
     assert report.passed
     assert list(df["file_name"]) == ["a.png", "b.png"]
     assert list(df["ground_truth"]) == ["A", "B"]
+
+
+def test_pipeline_passes_shared_limiter_and_log_lock_to_finix_clients(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (120, 240), "white").save(input_dir / "a.png")
+    Image.new("RGB", (120, 240), "white").save(input_dir / "b.png")
+
+    captured_limiters = []
+    captured_log_locks = []
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured_limiters.append(kwargs["limiter"])
+            captured_log_locks.append(kwargs["log_lock"])
+
+        def parse_chunks(self, chunks, force_api=False):
+            return [
+                ChunkText(chunk=chunk, markdown="# ok", block_type="body", source="api")
+                for chunk in chunks
+            ], 0
+
+    config = _config(tmp_path, [input_dir], image_concurrency=2)
+    pipeline = Pipeline(config)
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", CapturingClient)
+
+    report = pipeline.run()
+
+    assert report.passed
+    assert captured_limiters
+    assert all(limiter is pipeline.api_limiter for limiter in captured_limiters)
+    assert captured_log_locks
+    assert all(lock is pipeline.log_lock for lock in captured_log_locks)
+
+
+def test_pipeline_scales_chunk_worker_count_when_image_concurrency_is_enabled(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (120, 240), "white").save(input_dir / "a.png")
+    Image.new("RGB", (120, 240), "white").save(input_dir / "b.png")
+
+    captured_concurrency = []
+
+    class CapturingClient:
+        def __init__(self, **kwargs):
+            captured_concurrency.append(kwargs["concurrency"])
+
+        def parse_chunks(self, chunks, force_api=False):
+            return [
+                ChunkText(chunk=chunk, markdown="# ok", block_type="body", source="api")
+                for chunk in chunks
+            ], 0
+
+    config = _config(tmp_path, [input_dir], image_concurrency=2)
+    config.api["concurrency"] = 4
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", CapturingClient)
+
+    report = Pipeline(config).run()
+
+    assert report.passed
+    assert captured_concurrency
+    assert set(captured_concurrency) == {2}

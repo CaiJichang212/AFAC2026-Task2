@@ -190,6 +190,7 @@ class Pipeline:
         force_api: bool = False,
         concurrency_override: int | None = None,
     ) -> tuple[list[ChunkText], int]:
+        worker_concurrency = self._chunk_worker_concurrency(concurrency_override)
         client = FinixApiClient(
             api_key=self.config.api_key,
             user_ids=self.config.user_ids,
@@ -197,9 +198,11 @@ class Pipeline:
             paths=self.config.paths,
             timeout_seconds=int(self.config.api.get("timeout_seconds", 240)),
             max_retries=int(self.config.api.get("max_retries", 3)),
-            concurrency=concurrency_override or int(self.config.api.get("concurrency", 1)),
+            concurrency=worker_concurrency,
             per_user_concurrency=int(self.config.api.get("per_user_concurrency", 1)),
             run_id=self.run_id,
+            limiter=self.api_limiter,
+            log_lock=self.log_lock,
         )
         return client.parse_chunks(chunks, force_api=force_api)
 
