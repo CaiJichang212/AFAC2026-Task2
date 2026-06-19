@@ -68,6 +68,16 @@ def test_pipeline_dry_run_generates_profiles_manifests_and_merged_csv(tmp_path):
     assert (config.paths.merged_dir / "one.md").exists()
     assert (config.paths.qc_dir / "one.json").exists()
 
+    qc = json.loads((config.paths.qc_dir / "one.json").read_text(encoding="utf-8"))
+    metrics = qc["metrics"]
+    assert metrics["dry_run"] is True
+    assert metrics["chunks"] >= 1
+    assert "max_chunk_pixels" in metrics
+    assert metrics["over_hard_chunks"] == 0
+    assert "chunk_policy" in metrics
+    assert metrics["chunk_policy"] in {"normal_page_v1", "long_dynamic_v1", "table_grid_v2"}
+    assert "over_safe_chunks" in metrics
+
 
 def test_pipeline_blocks_duplicate_input_file_names(tmp_path):
     from finix_restore.pipeline import Pipeline, PipelineError

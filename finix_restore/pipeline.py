@@ -12,7 +12,7 @@ from finix_restore.config import RunConfig
 from finix_restore.dedup import DedupMerger
 from finix_restore.finix_api import FinixApiClient
 from finix_restore.layout_sentry import LayoutSentry
-from finix_restore.models import ChunkText, ImageProfile, LayoutHints, ProcessedFile, QualityReport
+from finix_restore.models import Chunk, ChunkText, ImageProfile, LayoutHints, ProcessedFile, QualityReport
 from finix_restore.normalizer import MarkdownNormalizer
 from finix_restore.profiler import ImageProfiler
 from finix_restore.quality_gate import IMAGE_SUFFIXES, QualityGate
@@ -96,7 +96,7 @@ class Pipeline:
         if self.config.dry_run:
             markdown = ""
             self._write_merged(profile.file_name, markdown)
-            self._write_dry_run_qc(profile, chunks_count=len(chunks))
+            self._write_dry_run_qc(profile, chunks)
             quality = QualityReport(
                 passed=True,
                 risks=[],
@@ -213,15 +213,27 @@ class Pipeline:
     def _merged_path(self, file_name: str) -> Path:
         return self.config.paths.merged_dir / f"{Path(file_name).stem}.md"
 
-    def _write_dry_run_qc(self, profile: ImageProfile, chunks_count: int) -> None:
+    def _write_dry_run_qc(self, profile: ImageProfile, chunks: Sequence[Chunk]) -> None:
         self.config.paths.qc_dir.mkdir(parents=True, exist_ok=True)
+        chunk_policy = {
+            "long_strip": "long_dynamic_v1",
+            "table_page": "table_grid_v2",
+            "normal_page": "normal_page_v1",
+        }.get(profile.doc_type, "unknown")
+        max_chunk_pixels = max((c.chunk_pixels for c in chunks), default=0)
+        over_safe = sum(1 for c in chunks if "over_safe_pixels" in c.risk_flags)
+        over_hard = sum(1 for c in chunks if c.chunk_pixels > self.config.chunk.hard_max_pixels)
         payload = {
             "passed": True,
             "risks": [],
             "metrics": {
                 "doc_type": profile.doc_type,
-                "chunks": chunks_count,
+                "chunks": len(chunks),
                 "dry_run": True,
+                "chunk_policy": chunk_policy,
+                "max_chunk_pixels": max_chunk_pixels,
+                "over_safe_chunks": over_safe,
+                "over_hard_chunks": over_hard,
             },
         }
         (self.config.paths.qc_dir / f"{Path(profile.file_name).stem}.json").write_text(
