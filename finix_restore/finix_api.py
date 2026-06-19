@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -16,6 +18,16 @@ class FinixApiError(RuntimeError):
     pass
 
 
+_CACHE_VALIDATOR_VERSION = 1
+_SERVICE_BUSY_HTML_MARKERS = (
+    "服务器繁忙",
+    "顾客太多",
+    "j_retry_link",
+    "showtextwait",
+    "支付宝版权所有",
+)
+
+
 class FinixApiClient:
     def __init__(
         self,
@@ -26,7 +38,8 @@ class FinixApiClient:
         timeout_seconds: int = 240,
         max_retries: int = 3,
         concurrency: int = 4,
-        per_user_concurrency: int = 1,
+        per_user_concurrency: int | None = None,
+        run_id: str | None = None,
         session=None,
         sleep: Callable[[int], None] = time.sleep,
     ) -> None:
@@ -38,8 +51,12 @@ class FinixApiClient:
         self.paths = paths
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
-        self.concurrency = min(concurrency, max(1, len(user_ids) * per_user_concurrency))
+        if per_user_concurrency is None:
+            self.concurrency = max(1, concurrency)
+        else:
+            self.concurrency = min(concurrency, max(1, len(user_ids) * per_user_concurrency))
         self.per_user_concurrency = per_user_concurrency
+        self.run_id = run_id or ""
         self.session = session or requests.Session()
         self.sleep = sleep
         self._user_index = 0
@@ -48,15 +65,20 @@ class FinixApiClient:
     def parse_chunk(self, chunk: Chunk, force_api: bool = False) -> ChunkText:
         cached = None if force_api else self._read_cache(chunk)
         if cached is not None:
+            cached_sha1 = self._sha1(cached)
             self._log(
                 {
                     "event": "api_call",
+                    "run_id": self.run_id,
                     "file_name": chunk.file_name,
                     "chunk_id": chunk.chunk_id,
                     "user_id": "",
                     "status": "cache",
                     "elapsed_ms": 0,
                     "retry_index": 0,
+                    "response_sha1": cached_sha1,
+                    "response_chars": len(cached),
+                    "content_validated": True,
                 }
             )
             return ChunkText(chunk=chunk, markdown=cached, block_type=self._block_type(cached), source="cache")
@@ -69,22 +91,43 @@ class FinixApiClient:
                 markdown = self._post_chunk(chunk, user_id)
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 self._write_cache(chunk, markdown)
-                self._log_api_call(chunk, user_id, "ok", elapsed_ms, retry_index)
+                self._log_api_call(chunk, user_id, "ok", elapsed_ms, retry_index, markdown)
                 return ChunkText(chunk=chunk, markdown=markdown, block_type=self._block_type(markdown), source="api")
             except FinixApiError as exc:
                 elapsed_ms = int((time.perf_counter() - started) * 1000)
                 last_error = str(exc)
                 if "authentication" in last_error:
-                    self._log_api_call(chunk, user_id, "auth_error", elapsed_ms, retry_index)
+                    self._log_api_call(chunk, user_id, "auth_error", elapsed_ms, retry_index, None)
                     raise
-                self._log_api_call(chunk, user_id, "retryable_error", elapsed_ms, retry_index)
+                self._log_api_call(chunk, user_id, "retryable_error", elapsed_ms, retry_index, None)
                 if retry_index >= self.max_retries:
                     break
                 self.sleep(2**retry_index)
         raise FinixApiError(f"FinixDoc-VL request failed after retries: {last_error}")
 
-    def parse_chunks(self, chunks: list[Chunk], force_api: bool = False) -> list[ChunkText]:
-        return [self.parse_chunk(chunk, force_api=force_api) for chunk in chunks]
+    def parse_chunks(self, chunks: list[Chunk], force_api: bool = False) -> tuple[list[ChunkText], int]:
+        def _parse_one(chunk: Chunk) -> ChunkText:
+            return self.parse_chunk(chunk, force_api=force_api)
+
+        failed_chunks = 0
+        results: list[ChunkText | None] = [None] * len(chunks)
+        with ThreadPoolExecutor(max_workers=self.concurrency) as executor:
+            futures = [executor.submit(_parse_one, chunk) for chunk in chunks]
+            for index, future in enumerate(futures):
+                chunk = chunks[index]
+                try:
+                    results[index] = future.result()
+                except FinixApiError as exc:
+                    if "authentication" in str(exc):
+                        raise
+                    failed_chunks += 1
+                    results[index] = ChunkText(
+                        chunk=chunk,
+                        markdown="",
+                        block_type="unknown",
+                        source="api",
+                    )
+        return [result for result in results if result is not None], failed_chunks
 
     def _post_chunk(self, chunk: Chunk, user_id: str) -> str:
         data = {
@@ -113,6 +156,7 @@ class FinixApiClient:
         if status_code >= 400:
             raise FinixApiError(f"http {status_code}: {text[:200]}")
         markdown = self._extract_markdown(str(text))
+        self._validate_markdown_response(markdown)
         if not markdown:
             raise FinixApiError("empty response")
         return markdown
@@ -175,13 +219,20 @@ class FinixApiClient:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             return None
+        raw_markdown = raw_path.read_text(encoding="utf-8")
         if meta.get("chunk_id") != chunk.chunk_id:
             return None
         if meta.get("image_sha1") != chunk.image_sha1:
             return None
         if meta.get("api_url") != self.api_url:
             return None
-        return raw_path.read_text(encoding="utf-8")
+        if meta.get("content_validated") is not True:
+            return None
+        if meta.get("validator_version") != _CACHE_VALIDATOR_VERSION:
+            return None
+        if meta.get("response_sha1") != self._sha1(raw_markdown):
+            return None
+        return raw_markdown
 
     def _write_cache(self, chunk: Chunk, markdown: str) -> None:
         raw_dir = self._raw_dir(chunk)
@@ -193,6 +244,9 @@ class FinixApiClient:
                     "chunk_id": chunk.chunk_id,
                     "image_sha1": chunk.image_sha1,
                     "api_url": self.api_url,
+                    "content_validated": True,
+                    "validator_version": _CACHE_VALIDATOR_VERSION,
+                    "response_sha1": self._sha1(markdown),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -200,16 +254,28 @@ class FinixApiClient:
             encoding="utf-8",
         )
 
-    def _log_api_call(self, chunk: Chunk, user_id: str, status: str, elapsed_ms: int, retry_index: int) -> None:
+    def _log_api_call(
+        self,
+        chunk: Chunk,
+        user_id: str,
+        status: str,
+        elapsed_ms: int,
+        retry_index: int,
+        markdown: str | None,
+    ) -> None:
         self._log(
             {
                 "event": "api_call",
+                "run_id": self.run_id,
                 "file_name": chunk.file_name,
                 "chunk_id": chunk.chunk_id,
                 "user_id": user_id,
                 "status": status,
                 "elapsed_ms": elapsed_ms,
                 "retry_index": retry_index,
+                "response_sha1": self._sha1(markdown) if markdown is not None else "",
+                "response_chars": len(markdown) if markdown is not None else 0,
+                "content_validated": markdown is not None,
             }
         )
 
@@ -220,3 +286,23 @@ class FinixApiClient:
 
     def _block_type(self, markdown: str) -> str:
         return "table" if "<table" in markdown.lower() else "body"
+
+    def _validate_markdown_response(self, markdown: str) -> None:
+        lowered = markdown.strip().lower()
+        if not lowered:
+            return
+        is_full_html = (
+            (lowered.startswith("<!doctype html") or lowered.startswith("<html"))
+            and "<head" in lowered
+            and "<body" in lowered
+        )
+        if not is_full_html:
+            return
+        if any(marker in lowered for marker in _SERVICE_BUSY_HTML_MARKERS):
+            raise FinixApiError("service busy html page")
+        if "alipayobjects.com" in lowered and "<html" in lowered:
+            raise FinixApiError("service busy html page")
+        raise FinixApiError("full html page response")
+
+    def _sha1(self, markdown: str | None) -> str:
+        return hashlib.sha1((markdown or "").encode("utf-8")).hexdigest()

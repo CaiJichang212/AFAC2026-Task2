@@ -12,6 +12,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--work_dir", default="outputs/run")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--limit_per_dir", type=int)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force_api", action="store_true")
     parser.add_argument("--dry_run", action="store_true")

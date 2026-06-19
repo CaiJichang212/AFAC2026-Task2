@@ -7,11 +7,18 @@ from typing import Sequence
 
 import pandas as pd
 
-from finix_restore.models import DocType, QualityReport
+from finix_restore.models import DocType, ProcessedFile, QualityReport
 from finix_restore.paths import RunPaths
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+SERVICE_BUSY_HTML_MARKERS = (
+    "服务器繁忙",
+    "顾客太多",
+    "j_retry_link",
+    "showtextwait",
+    "支付宝版权所有",
+)
 
 
 class QualityGate:
@@ -77,6 +84,7 @@ class QualityGate:
         doc_type: DocType,
         chunk_count: int,
         failed_chunks: int,
+        extra_metrics: dict[str, float | int | str] | None = None,
     ) -> QualityReport:
         risks: list[str] = []
         text = markdown or ""
@@ -90,6 +98,7 @@ class QualityGate:
         if duplication_ratio > self.max_duplication_ratio:
             risks.append("high_duplication")
 
+        risks.extend(self.detect_forbidden_html(text))
         if self._html_is_broken(text):
             risks.append("html_broken")
 
@@ -97,20 +106,83 @@ class QualityGate:
         if failure_ratio > self.max_api_failure_ratio:
             risks.append("api_failure_ratio_high")
 
+        metrics = {
+            "chars": len(stripped),
+            "duplication_ratio": duplication_ratio,
+            "chunk_count": chunk_count,
+            "failed_chunks": failed_chunks,
+            "api_failure_ratio": failure_ratio,
+            "doc_type": doc_type,
+        }
+        if extra_metrics:
+            metrics.update(extra_metrics)
         report = QualityReport(
             passed=not risks,
-            risks=risks,
-            metrics={
-                "chars": len(stripped),
-                "duplication_ratio": duplication_ratio,
-                "chunk_count": chunk_count,
-                "failed_chunks": failed_chunks,
-                "api_failure_ratio": failure_ratio,
-                "doc_type": doc_type,
-            },
+            risks=list(dict.fromkeys(risks)),
+            metrics=metrics,
         )
         self._write_file_report(file_name, report)
         return report
+
+    def write_run_summary(
+        self,
+        processed_files: Sequence[ProcessedFile],
+        output_csv: Path | None,
+        dry_run: bool = False,
+    ) -> dict[str, object]:
+        risk_counts = Counter()
+        failed_files: list[str] = []
+        files_payload: list[dict[str, object]] = []
+        for processed in processed_files:
+            if not processed.quality.passed:
+                failed_files.append(processed.file_name)
+            for risk in processed.quality.risks:
+                risk_counts[risk] += 1
+            files_payload.append(
+                {
+                    "file_name": processed.file_name,
+                    "rerun_count": processed.rerun_count,
+                    "quality": {
+                        "passed": processed.quality.passed,
+                        "risks": processed.quality.risks,
+                        "metrics": processed.quality.metrics,
+                    },
+                }
+            )
+
+        summary = {
+            "passed": not failed_files,
+            "failed_files": failed_files,
+            "risk_counts": dict(risk_counts),
+            "file_count": len(processed_files),
+            "output_csv": str(output_csv) if output_csv is not None else None,
+            "dry_run": dry_run,
+            "files": files_payload,
+        }
+        self.paths.qc_dir.mkdir(parents=True, exist_ok=True)
+        (self.paths.qc_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return summary
+
+    def detect_forbidden_html(self, markdown: str) -> list[str]:
+        lowered = markdown.strip().lower()
+        if not lowered:
+            return []
+        risks: list[str] = []
+        is_full_html = (
+            (lowered.startswith("<!doctype html") or lowered.startswith("<html"))
+            and "<head" in lowered
+            and "<body" in lowered
+        )
+        if is_full_html:
+            risks.append("full_html_page")
+            if any(marker in lowered for marker in SERVICE_BUSY_HTML_MARKERS) or (
+                "alipayobjects.com" in lowered and "<html" in lowered
+            ):
+                risks.append("service_busy_html")
+        return risks
 
     def _write_file_report(self, file_name: str, report: QualityReport) -> None:
         stem = Path(file_name).stem

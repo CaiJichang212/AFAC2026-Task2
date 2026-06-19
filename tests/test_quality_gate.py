@@ -75,23 +75,148 @@ def test_file_quality_reports_empty_broken_html_duplication_and_api_failures(tmp
     assert "empty_output" in empty.risks
 
 
+def test_quality_gate_flags_service_busy_html_page(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    paths = RunPaths.from_work_dir(tmp_path / "work")
+    gate = QualityGate(paths)
+    markdown = (
+        "<!DOCTYPE html><html><head><title>busy</title></head><body>"
+        "服务器繁忙 顾客太多 <div id='J_retry_link'></div><div class='showTextWait'></div>"
+        "支付宝版权所有"
+        "</body></html>"
+    )
+
+    report = gate.check_file(
+        file_name="busy.png",
+        markdown=markdown,
+        doc_type="normal_page",
+        chunk_count=1,
+        failed_chunks=0,
+    )
+
+    assert not report.passed
+    assert "service_busy_html" in report.risks
+    assert "full_html_page" in report.risks
+    qc = json.loads((paths.qc_dir / "busy.json").read_text(encoding="utf-8"))
+    assert "service_busy_html" in qc["risks"]
+    assert "full_html_page" in qc["risks"]
+
+
+def test_quality_gate_allows_html_table_fragment(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    gate = QualityGate(RunPaths.from_work_dir(tmp_path / "work"))
+    report = gate.check_file(
+        file_name="table.png",
+        markdown="<table><tr><td>保障责任</td></tr></table>",
+        doc_type="normal_page",
+        chunk_count=1,
+        failed_chunks=0,
+    )
+
+    assert "service_busy_html" not in report.risks
+    assert "full_html_page" not in report.risks
+
+
 def test_retry_planner_maps_risks_to_actions():
     from finix_restore.models import QualityReport
     from finix_restore.retry_planner import RetryPlanner
 
     report = QualityReport(
         passed=False,
-        risks=["empty_output", "too_short", "html_broken", "api_timeout"],
+        risks=["empty_output", "too_short", "html_broken", "api_failure_ratio_high"],
         metrics={},
     )
 
     plan = RetryPlanner(max_reruns_per_file=2).plan(report, rerun_count=0)
 
     assert plan["rerun"] is True
-    assert plan["window_scale"] == 0.7
+    assert plan["force_api"] is False
+    assert plan["window_scale"] == 1.0
     assert plan["overlap_scale"] == 1.5
-    assert plan["table_grid_scale"] == 0.7
+    assert plan["table_grid_scale"] == 1.0
     assert plan["concurrency"] == 1
 
     exhausted = RetryPlanner(max_reruns_per_file=1).plan(report, rerun_count=1)
     assert exhausted["rerun"] is False
+
+
+def test_retry_planner_for_html_risks_forces_api_and_serial_rerun():
+    from finix_restore.models import QualityReport
+    from finix_restore.retry_planner import RetryPlanner
+
+    planner = RetryPlanner(max_reruns_per_file=2)
+
+    for risk in ("service_busy_html", "full_html_page"):
+        plan = planner.plan(QualityReport(passed=False, risks=[risk], metrics={}), rerun_count=0)
+        assert plan["rerun"] is True
+        assert plan["force_api"] is True
+        assert plan["concurrency"] == 1
+        assert plan["reasons"] == [risk]
+
+
+def test_quality_gate_detects_full_html_error_page_but_allows_table_fragment(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    gate = QualityGate(RunPaths.from_work_dir(tmp_path / "work"))
+
+    broken = gate.check_file(
+        file_name="broken.png",
+        markdown=(
+            "<!DOCTYPE html><html><head><title>busy</title></head>"
+            "<body>服务器繁忙<div id='J_retry_link'></div></body></html>"
+        ),
+        doc_type="normal_page",
+        chunk_count=1,
+        failed_chunks=0,
+    )
+
+    assert not broken.passed
+    assert "full_html_page" in broken.risks
+
+    allowed = gate.check_file(
+        file_name="table.png",
+        markdown="<table><tr><td>保障责任</td></tr></table>",
+        doc_type="normal_page",
+        chunk_count=1,
+        failed_chunks=0,
+    )
+
+    assert "full_html_page" not in allowed.risks
+    assert "html_broken" not in allowed.risks
+
+
+def test_quality_gate_writes_run_summary_json(tmp_path):
+    from finix_restore.models import ProcessedFile, QualityReport
+    from finix_restore.quality_gate import QualityGate
+
+    paths = RunPaths.from_work_dir(tmp_path / "work")
+    gate = QualityGate(paths)
+    processed = [
+        ProcessedFile(
+            file_name="ok.png",
+            markdown="# ok",
+            quality=QualityReport(passed=True, risks=[], metrics={"chars": 3}),
+            rerun_count=0,
+        ),
+        ProcessedFile(
+            file_name="bad.png",
+            markdown="",
+            quality=QualityReport(passed=False, risks=["empty_output"], metrics={"chars": 0}),
+            rerun_count=2,
+        ),
+    ]
+
+    summary = gate.write_run_summary(processed, output_csv=tmp_path / "submission.csv", dry_run=False)
+
+    assert summary["passed"] is False
+    assert summary["failed_files"] == ["bad.png"]
+    assert summary["file_count"] == 2
+    assert summary["output_csv"] == str(tmp_path / "submission.csv")
+    assert summary["risk_counts"]["empty_output"] == 1
+    assert summary["files"][1]["file_name"] == "bad.png"
+    assert summary["files"][1]["rerun_count"] == 2
+
+    persisted = json.loads((paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
+    assert persisted == summary

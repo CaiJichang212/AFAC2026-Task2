@@ -69,3 +69,11 @@ class QualityReport:
     passed: bool
     risks: list[str]
     metrics: dict[str, float | int | str]
+
+
+@dataclass(frozen=True)
+class ProcessedFile:
+    file_name: str
+    markdown: str
+    quality: QualityReport
+    rerun_count: int = 0

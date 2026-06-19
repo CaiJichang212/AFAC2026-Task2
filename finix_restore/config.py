@@ -34,6 +34,7 @@ class RunConfig:
     force_api: bool = False
     dry_run: bool = False
     limit: int | None = None
+    limit_per_dir: int | None = None
 
     def snapshot(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -101,4 +102,5 @@ def load_config(args) -> RunConfig:
         force_api=bool(args.force_api),
         dry_run=dry_run,
         limit=args.limit,
+        limit_per_dir=args.limit_per_dir,
     )

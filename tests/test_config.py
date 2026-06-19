@@ -174,11 +174,14 @@ def test_config_keeps_repeated_input_dirs_and_caps_concurrency(tmp_path, monkeyp
             str(tmp_path / "work"),
             "--config",
             str(config_path),
+            "--limit_per_dir",
+            "3",
         ]
     )
     config = load_config(args)
 
     assert config.input_dirs == [input_a, input_b]
+    assert config.limit_per_dir == 3
     assert config.api["concurrency"] == 2
     assert config.api_url == "https://example.test/api"
     assert config.snapshot()["api_key"] == "***"
@@ -196,3 +199,31 @@ def test_run_paths_creates_expected_directories(tmp_path):
     assert paths.qc_dir.exists()
     assert paths.logs_dir.exists()
     assert paths.metrics_dir.exists()
+
+
+def test_config_reads_limit_per_dir_argument(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1")
+
+    args = parse_args(
+        [
+            "--input_dir",
+            str(input_dir),
+            "--output_csv",
+            str(tmp_path / "submission.csv"),
+            "--work_dir",
+            str(tmp_path / "work"),
+            "--config",
+            str(config_path),
+            "--limit_per_dir",
+            "5",
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.limit_per_dir == 5

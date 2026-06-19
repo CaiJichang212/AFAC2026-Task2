@@ -10,6 +10,7 @@ class RetryPlanner:
     def plan(self, report: QualityReport, rerun_count: int = 0) -> dict[str, bool | float | int | list[str]]:
         actions: dict[str, bool | float | int | list[str]] = {
             "rerun": False,
+            "force_api": False,
             "window_scale": 1.0,
             "overlap_scale": 1.0,
             "table_grid_scale": 1.0,
@@ -20,16 +21,13 @@ class RetryPlanner:
             return actions
 
         risks = set(report.risks)
-        if "empty_output" in risks:
-            actions["window_scale"] = 0.7
+        if "service_busy_html" in risks or "full_html_page" in risks:
+            actions["force_api"] = True
+            actions["concurrency"] = 1
+        if "api_failure_ratio_high" in risks:
             actions["concurrency"] = 1
         if "too_short" in risks:
             actions["overlap_scale"] = 1.5
-        if "html_broken" in risks:
-            actions["table_grid_scale"] = 0.7
-        if "api_timeout" in risks or "api_failure_ratio_high" in risks:
-            actions["window_scale"] = min(float(actions["window_scale"]), 0.7)
-            actions["concurrency"] = 1
 
         actions["rerun"] = True
         return actions

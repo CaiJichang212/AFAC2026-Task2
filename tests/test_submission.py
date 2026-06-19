@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 from PIL import Image
+import json
 
 from finix_restore.config import RunConfig
 from finix_restore.paths import RunPaths
@@ -88,28 +89,35 @@ def test_pipeline_resume_reuses_existing_merged_markdown_without_api(tmp_path):
 
     input_dir = tmp_path / "images"
     input_dir.mkdir()
-    Image.new("RGB", (120, 240), "white").save(input_dir / "cached.png")
+    Image.new("RGB", (5000, 300), "white").save(input_dir / "cached.png")
     config = _config(tmp_path, [input_dir], tmp_path / "submission.csv", dry_run=False)
     config.paths.merged_dir.mkdir(parents=True, exist_ok=True)
-    (config.paths.merged_dir / "cached.md").write_text("# cached result\n", encoding="utf-8")
+    (config.paths.merged_dir / "cached.md").write_text("X" * 2500, encoding="utf-8")
 
     report = Pipeline(config).run()
 
     df = pd.read_csv(config.output_csv)
     assert report.passed
-    assert df.loc[0, "ground_truth"] == "# cached result\n"
+    assert df.loc[0, "ground_truth"] == "X" * 2500
+    summary = json.loads((config.paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["files"][0]["quality"]["metrics"]["from_merged_cache"] == 1
 
 
-def test_pipeline_records_retry_exhausted_chunk_failure_and_still_writes_csv(tmp_path, monkeypatch):
+def test_pipeline_records_retry_exhausted_chunk_failure_and_blocks_csv(tmp_path, monkeypatch):
     from finix_restore.finix_api import FinixApiError
-    from finix_restore.pipeline import Pipeline
+    from finix_restore.pipeline import Pipeline, PipelineError
 
     class FailingClient:
         def __init__(self, **kwargs):
             pass
 
-        def parse_chunk(self, chunk, force_api=False):
-            raise FinixApiError("FinixDoc-VL request failed after retries: timeout")
+        def parse_chunks(self, chunks, force_api=False):
+            from finix_restore.models import ChunkText
+
+            return [
+                ChunkText(chunk=chunk, markdown="", block_type="unknown", source="api")
+                for chunk in chunks
+            ], len(chunks)
 
     input_dir = tmp_path / "images"
     input_dir.mkdir()
@@ -117,12 +125,11 @@ def test_pipeline_records_retry_exhausted_chunk_failure_and_still_writes_csv(tmp
     config = _config(tmp_path, [input_dir], tmp_path / "submission.csv", dry_run=False)
     monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", FailingClient)
 
-    report = Pipeline(config).run()
+    with pytest.raises(PipelineError, match="quality gate failed"):
+        Pipeline(config).run()
 
-    df = pd.read_csv(config.output_csv)
     qc = (config.paths.qc_dir / "failed.json").read_text(encoding="utf-8")
-    assert report.passed
-    assert df.loc[0, "file_name"] == "failed.png"
+    assert not config.output_csv.exists()
     assert "api_failure_ratio_high" in qc
     assert "empty_output" in qc
 
@@ -135,8 +142,11 @@ def test_pipeline_writes_normalized_chunk_outputs(tmp_path, monkeypatch):
         def __init__(self, **kwargs):
             pass
 
-        def parse_chunk(self, chunk, force_api=False):
-            return ChunkText(chunk=chunk, markdown="##1.1 标题  ", block_type="body", source="api")
+        def parse_chunks(self, chunks, force_api=False):
+            return [
+                ChunkText(chunk=chunk, markdown="##1.1 标题  ", block_type="body", source="api")
+                for chunk in chunks
+            ], 0
 
     input_dir = tmp_path / "images"
     input_dir.mkdir()
