@@ -76,6 +76,15 @@ def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
         assert 0 <= y0 < y1 <= 4200
         assert (x1 - x0) * (y1 - y0) <= 13_800_000
 
+    manifest = json.loads((tmp_path / "chunks" / "table" / "manifest.json").read_text())
+    assert manifest["chunk_policy"] == "table_grid_v2"
+    assert manifest["content_box"] == [0, 0, 6000, 4200]
+    last_chunk = manifest["chunks"][-1]
+    assert last_chunk["is_last_row"] is True
+    assert last_chunk["is_last_col"] is True
+    assert last_chunk["cut_source"] in {"full_page", "grid"}
+    assert isinstance(last_chunk["risk_flags"], list)
+
 
 def test_default_table_config_splits_15m_pixel_pages_for_api_stability():
     config = yaml.safe_load(open("configs/default.yaml", encoding="utf-8"))
