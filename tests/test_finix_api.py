@@ -1,5 +1,6 @@
 import hashlib
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -393,3 +394,51 @@ def test_retries_5xx_and_fails_fast_on_auth_error(tmp_path):
     with pytest.raises(FinixApiError, match="authentication"):
         auth_client.parse_chunk(_chunk(tmp_path, chunk_id="auth"))
     assert len(auth_session.calls) == 1
+
+
+def test_post_chunk_uses_limiter_around_http_request(tmp_path):
+    from finix_restore.finix_api import FinixApiClient
+
+    class TrackingLimiter:
+        def __init__(self):
+            self.active = False
+            self.entered_user_ids = []
+            self.post_happened_inside_limiter = False
+
+        @contextmanager
+        def acquire(self, user_id):
+            self.entered_user_ids.append(user_id)
+            self.active = True
+            try:
+                yield
+            finally:
+                self.active = False
+
+    class CheckingSession(FakeSession):
+        def __init__(self, limiter):
+            super().__init__([FakeResponse(200, "# ok")])
+            self.limiter = limiter
+
+        def post(self, url, data=None, files=None, timeout=None):
+            self.limiter.post_happened_inside_limiter = self.limiter.active
+            return super().post(url, data=data, files=files, timeout=timeout)
+
+    paths = RunPaths.from_work_dir(tmp_path / "work")
+    limiter = TrackingLimiter()
+    session = CheckingSession(limiter)
+    client = FinixApiClient(
+        api_key="secret-key",
+        user_ids=["finixA1001"],
+        api_url="https://example.test/api",
+        paths=paths,
+        limiter=limiter,
+        session=session,
+        sleep=lambda _: None,
+    )
+
+    result = client.parse_chunk(_chunk(tmp_path))
+
+    assert result.markdown == "# ok"
+    assert limiter.entered_user_ids == ["finixA1001"]
+    assert limiter.post_happened_inside_limiter is True
+    assert limiter.active is False

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Callable
 
 import requests
 
+from finix_restore.concurrency import ApiConcurrencyLimiter
 from finix_restore.models import Chunk, ChunkText
 from finix_restore.paths import RunPaths
 
@@ -41,6 +43,8 @@ class FinixApiClient:
         per_user_concurrency: int | None = None,
         run_id: str | None = None,
         session=None,
+        limiter: ApiConcurrencyLimiter | None = None,
+        log_lock: threading.Lock | None = None,
         sleep: Callable[[int], None] = time.sleep,
     ) -> None:
         if not user_ids:
@@ -57,10 +61,19 @@ class FinixApiClient:
             self.concurrency = min(concurrency, max(1, len(user_ids) * per_user_concurrency))
         self.per_user_concurrency = per_user_concurrency
         self.run_id = run_id or ""
-        self.session = session or requests.Session()
+        self.session = session  # 保留 attribute 兼容旧引用（含测试中的 client.session）
+        self._provided_session = session
+        self._thread_local = threading.local()
         self.sleep = sleep
         self._user_index = 0
         self._disabled_user_ids: set[str] = set()
+        self._user_lock = threading.Lock()
+        self._log_lock = log_lock or threading.Lock()
+        self.limiter = limiter or ApiConcurrencyLimiter(
+            global_concurrency=self.concurrency,
+            user_ids=self.user_ids,
+            per_user_concurrency=per_user_concurrency or self.concurrency,
+        )
 
     def parse_chunk(self, chunk: Chunk, force_api: bool = False) -> ChunkText:
         cached = None if force_api else self._read_cache(chunk)
@@ -138,12 +151,13 @@ class FinixApiClient:
         try:
             with chunk.image_path.open("rb") as f:
                 files = {"file": (chunk.image_path.name, f)}
-                response = self.session.post(
-                    self.api_url,
-                    data=data,
-                    files=files,
-                    timeout=self.timeout_seconds,
-                )
+                with self.limiter.acquire(user_id):
+                    response = self._session().post(
+                        self.api_url,
+                        data=data,
+                        files=files,
+                        timeout=self.timeout_seconds,
+                    )
         except (requests.Timeout, requests.RequestException) as exc:
             raise FinixApiError(f"retryable network error: {exc}") from exc
 
@@ -192,14 +206,24 @@ class FinixApiClient:
         return stripped
 
     def _next_user_id(self) -> str:
-        if len(self._disabled_user_ids) >= len(self.user_ids):
-            self._disabled_user_ids.clear()
-        for _ in range(len(self.user_ids)):
-            user_id = self.user_ids[self._user_index % len(self.user_ids)]
-            self._user_index += 1
-            if user_id not in self._disabled_user_ids:
-                return user_id
-        return self.user_ids[0]
+        with self._user_lock:
+            if len(self._disabled_user_ids) >= len(self.user_ids):
+                self._disabled_user_ids.clear()
+            for _ in range(len(self.user_ids)):
+                user_id = self.user_ids[self._user_index % len(self.user_ids)]
+                self._user_index += 1
+                if user_id not in self._disabled_user_ids:
+                    return user_id
+            return self.user_ids[0]
+
+    def _session(self):
+        if self._provided_session is not None:
+            return self._provided_session
+        session = getattr(self._thread_local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._thread_local.session = session
+        return session
 
     def _raw_dir(self, chunk: Chunk) -> Path:
         return self.paths.api_raw_dir / Path(chunk.file_name).stem
@@ -281,8 +305,9 @@ class FinixApiClient:
 
     def _log(self, payload: dict[str, object]) -> None:
         self.paths.logs_dir.mkdir(parents=True, exist_ok=True)
-        with (self.paths.logs_dir / "run.jsonl").open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        with self._log_lock:
+            with (self.paths.logs_dir / "run.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def _block_type(self, markdown: str) -> str:
         return "table" if "<table" in markdown.lower() else "body"
