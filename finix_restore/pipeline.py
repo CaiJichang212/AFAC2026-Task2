@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Sequence
 
 import yaml
 
 from finix_restore.chunkers import LongStripChunker, PageChunker, TableGridChunker
+from finix_restore.concurrency import ApiConcurrencyLimiter
 from finix_restore.config import RunConfig
 from finix_restore.dedup import DedupMerger
 from finix_restore.finix_api import FinixApiClient
@@ -46,6 +49,12 @@ class Pipeline:
             max_api_failure_ratio=float(config.quality.get("max_api_failure_ratio", 0.20)),
         )
         self.retry_planner = RetryPlanner(max_reruns_per_file=int(config.quality.get("max_reruns_per_file", 2)))
+        self.api_limiter = ApiConcurrencyLimiter(
+            global_concurrency=int(config.api.get("concurrency", 1)),
+            user_ids=config.user_ids,
+            per_user_concurrency=int(config.api.get("per_user_concurrency", 1)),
+        )
+        self.log_lock = threading.Lock()
 
     def run(self) -> QualityReport:
         self._write_config_snapshot()
@@ -55,21 +64,41 @@ class Pipeline:
             raise PipelineError(",".join(input_report.risks))
 
         image_paths = self._list_images(self.config.input_dirs)
-        processed_files: list[ProcessedFile] = []
-        rows: list[dict[str, str]] = []
-        for image_path in image_paths:
-            processed = self._process_image(image_path)
-            processed_files.append(processed)
-            rows.append({"file_name": image_path.name, "ground_truth": processed.markdown})
+        image_concurrency = max(1, int(self.config.runtime.get("image_concurrency", 1)))
+        processed_files: list[ProcessedFile | None] = [None] * len(image_paths)
+        rows: list[dict[str, str] | None] = [None] * len(image_paths)
+
+        if image_concurrency <= 1:
+            for index, image_path in enumerate(image_paths):
+                processed = self._process_image(image_path)
+                processed_files[index] = processed
+                rows[index] = {"file_name": image_path.name, "ground_truth": processed.markdown}
+        else:
+            with ThreadPoolExecutor(max_workers=image_concurrency) as executor:
+                future_to_index = {
+                    executor.submit(self._process_image, image_path): index
+                    for index, image_path in enumerate(image_paths)
+                }
+                for future in as_completed(future_to_index):
+                    index = future_to_index[future]
+                    image_path = image_paths[index]
+                    processed = future.result()
+                    processed_files[index] = processed
+                    rows[index] = {"file_name": image_path.name, "ground_truth": processed.markdown}
+
+        if any(item is None for item in processed_files) or any(item is None for item in rows):
+            raise PipelineError("internal error: incomplete parallel image results")
+        final_processed = [item for item in processed_files if item is not None]
+        final_rows = [item for item in rows if item is not None]
 
         summary = self.quality_gate.write_run_summary(
-            processed_files,
+            final_processed,
             output_csv=None if self.config.dry_run else self.config.output_csv,
             dry_run=self.config.dry_run,
         )
         if not self.config.dry_run and not summary["passed"]:
             raise PipelineError("quality gate failed")
-        return SubmissionWriter().write(rows, self.config.output_csv, [path.name for path in image_paths])
+        return SubmissionWriter().write(final_rows, self.config.output_csv, [path.name for path in image_paths])
 
     def _process_image(self, image_path: Path) -> ProcessedFile:
         profile = self.profiler.profile_and_write(image_path, self.config.paths.profiles_dir)
@@ -173,6 +202,15 @@ class Pipeline:
             run_id=self.run_id,
         )
         return client.parse_chunks(chunks, force_api=force_api)
+
+    def _chunk_worker_concurrency(self, concurrency_override: int | None = None) -> int:
+        if concurrency_override is not None:
+            return max(1, int(concurrency_override))
+        global_limit = max(1, int(self.config.api.get("concurrency", 1)))
+        image_concurrency = max(1, int(self.config.runtime.get("image_concurrency", 1)))
+        if image_concurrency <= 1:
+            return global_limit
+        return max(1, min(global_limit, (global_limit + image_concurrency - 1) // image_concurrency))
 
     def _chunk(self, profile: ImageProfile, hints: LayoutHints):
         if profile.doc_type == "long_strip":
