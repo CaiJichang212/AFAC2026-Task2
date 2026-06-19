@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,6 +36,7 @@ class RunConfig:
     dry_run: bool = False
     limit: int | None = None
     limit_per_dir: int | None = None
+    runtime: dict[str, int] = field(default_factory=lambda: {"image_concurrency": 1})
 
     def __post_init__(self) -> None:
         if not isinstance(self.chunk, ChunkConfig):
@@ -93,6 +94,13 @@ def load_config(args) -> RunConfig:
     api["concurrency"] = min(requested, max(1, len(user_ids) * per_user))
     api["per_user_concurrency"] = per_user
 
+    runtime = {"image_concurrency": int(raw.get("runtime", {}).get("image_concurrency", 1))}
+    cli_image_concurrency = getattr(args, "image_concurrency", None)
+    if cli_image_concurrency is not None:
+        runtime["image_concurrency"] = int(cli_image_concurrency)
+    if runtime["image_concurrency"] < 1:
+        raise ConfigError("runtime.image_concurrency must be >= 1")
+
     return RunConfig(
         input_dirs=input_dirs,
         output_csv=Path(args.output_csv),
@@ -109,4 +117,5 @@ def load_config(args) -> RunConfig:
         dry_run=dry_run,
         limit=args.limit,
         limit_per_dir=args.limit_per_dir,
+        runtime=runtime,
     )

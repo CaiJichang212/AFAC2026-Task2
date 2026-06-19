@@ -46,6 +46,8 @@ quality:
   max_duplication_ratio: 0.18
   max_api_failure_ratio: 0.20
   max_reruns_per_file: 2
+runtime:
+  image_concurrency: 3
 """,
         encoding="utf-8",
     )
@@ -242,3 +244,71 @@ def test_config_reads_limit_per_dir_argument(tmp_path, monkeypatch):
     config = load_config(args)
 
     assert config.limit_per_dir == 5
+
+
+def test_config_reads_image_concurrency_from_runtime_yaml(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1,u2,u3")
+
+    args = parse_args(
+        [
+            "--input_dir", str(input_dir),
+            "--output_csv", str(tmp_path / "submission.csv"),
+            "--work_dir", str(tmp_path / "work"),
+            "--config", str(config_path),
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.runtime["image_concurrency"] == 3
+    assert config.snapshot()["runtime"]["image_concurrency"] == 3
+
+
+def test_cli_image_concurrency_overrides_runtime_yaml(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1,u2,u3")
+
+    args = parse_args(
+        [
+            "--input_dir", str(input_dir),
+            "--output_csv", str(tmp_path / "submission.csv"),
+            "--work_dir", str(tmp_path / "work"),
+            "--config", str(config_path),
+            "--image_concurrency", "2",
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.runtime["image_concurrency"] == 2
+
+
+def test_config_rejects_invalid_image_concurrency(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    _write_yaml(config_path)
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1")
+
+    args = parse_args(
+        [
+            "--input_dir", str(input_dir),
+            "--output_csv", str(tmp_path / "submission.csv"),
+            "--work_dir", str(tmp_path / "work"),
+            "--config", str(config_path),
+            "--image_concurrency", "0",
+        ]
+    )
+
+    with pytest.raises(ConfigError, match="runtime.image_concurrency must be >= 1"):
+        load_config(args)

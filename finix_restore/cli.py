@@ -16,6 +16,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--force_api", action="store_true")
     parser.add_argument("--dry_run", action="store_true")
+    parser.add_argument("--image_concurrency", type=int)
     return parser.parse_args(argv)
 
 
