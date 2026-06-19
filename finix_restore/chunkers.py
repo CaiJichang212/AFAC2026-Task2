@@ -9,7 +9,13 @@ from pathlib import Path
 from PIL import Image
 
 from finix_restore.chunk_config import ChunkConfig, LongChunkConfig, TableChunkConfig
-from finix_restore.chunk_geometry import box_pixels, expand_box, nearest_band_center, overlap_dict
+from finix_restore.chunk_geometry import (
+    box_pixels,
+    expand_box,
+    nearest_band_center,
+    overlap_dict,
+    traceable_chunk_name,
+)
 from finix_restore.models import Chunk, ImageProfile, LayoutHints
 
 
@@ -136,11 +142,12 @@ class LongStripChunker:
 
         rows = len(slices)
         chunks: list[Chunk] = []
+        stem = Path(profile.file_name).stem
         for row, (y0, y1, cut_source) in enumerate(slices):
             is_last_row = row == rows - 1
             bbox = (cx0, y0, cx1, y1)
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
-            out_path = stem_dir / f"{cid}.jpg"
+            out_path = stem_dir / traceable_chunk_name(stem, row, 0, bbox)
             _save_crop(profile.path, bbox, out_path)
 
             ovl = overlap_dict(
@@ -160,6 +167,8 @@ class LongStripChunker:
                 flags.append("over_hard_pixels")
             if not is_last_row and cut_source != "blank_band":
                 flags.append("fixed_cut")
+            if 0 < chunk_pixels < self.config.min_pixels:
+                flags.append("small_tail")
             # de-duplicate while preserving order
             seen: set[str] = set()
             unique_flags: list[str] = []
@@ -293,6 +302,24 @@ class TableGridChunker:
             base_y_cuts,
             hints.horizontal_blank_bands,
             table_cfg.cut_search_px,
+        )
+
+        # Re-check pixel budget after blank-band adjustment. Moving a cut to a
+        # band can enlarge a neighbouring cell beyond safe_max once overlap is
+        # added; if so, fall back the offending band-adjusted cut to its base
+        # position and re-check until all cells fit (or no more band cuts to
+        # rollback). Endpoints are never adjusted, so this loop terminates.
+        x_cuts, x_from_band, y_cuts, y_from_band = self._enforce_pixel_budget(
+            base_x_cuts=base_x_cuts,
+            base_y_cuts=base_y_cuts,
+            x_cuts=x_cuts,
+            x_from_band=x_from_band,
+            y_cuts=y_cuts,
+            y_from_band=y_from_band,
+            content_box=content_box,
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+            safe_max_pixels=table_cfg.safe_max_pixels,
         )
 
         entries: list[dict] = []
@@ -436,6 +463,88 @@ class TableGridChunker:
         from_band.append(False)
         return adjusted, from_band
 
+    @staticmethod
+    def _enforce_pixel_budget(
+        base_x_cuts: list[int],
+        base_y_cuts: list[int],
+        x_cuts: list[int],
+        x_from_band: list[bool],
+        y_cuts: list[int],
+        y_from_band: list[bool],
+        content_box: tuple[int, int, int, int],
+        overlap_x: int,
+        overlap_y: int,
+        safe_max_pixels: int,
+    ) -> tuple[list[int], list[bool], list[int], list[bool]]:
+        """Roll back blank-band cut adjustments that push any cell over safe_max.
+
+        Iteratively rebuilds final overlap-included bboxes for every cell;
+        whenever a cell exceeds ``safe_max_pixels`` it picks the most-shifted
+        band-adjusted cut that touches the cell and resets it to the base grid
+        position. Endpoints are never adjusted, so progress is monotonic and
+        the loop terminates.
+        """
+        # Defensive copies so we can mutate.
+        x_cuts = list(x_cuts)
+        x_from_band = list(x_from_band)
+        y_cuts = list(y_cuts)
+        y_from_band = list(y_from_band)
+
+        cx0, cy0, cx1, cy1 = content_box
+        rows = len(y_cuts) - 1
+        cols = len(x_cuts) - 1
+        max_iter = (cols + rows) * 4 + 8
+
+        def cell_pixels(row: int, col: int) -> int:
+            base_x0 = x_cuts[col]
+            base_x1 = x_cuts[col + 1]
+            base_y0 = y_cuts[row]
+            base_y1 = y_cuts[row + 1]
+            x0 = max(cx0, base_x0 - (overlap_x if col > 0 else 0))
+            x1 = min(cx1, base_x1 + (overlap_x if col < cols - 1 else 0))
+            y0 = max(cy0, base_y0 - (overlap_y if row > 0 else 0))
+            y1 = min(cy1, base_y1 + (overlap_y if row < rows - 1 else 0))
+            return max(0, x1 - x0) * max(0, y1 - y0)
+
+        for _ in range(max_iter):
+            offending: tuple[int, int, int] | None = None  # (pixels, row, col)
+            for row in range(rows):
+                for col in range(cols):
+                    pixels = cell_pixels(row, col)
+                    if pixels > safe_max_pixels:
+                        if offending is None or pixels > offending[0]:
+                            offending = (pixels, row, col)
+            if offending is None:
+                break
+
+            _, row, col = offending
+            # Candidate band-adjusted cuts touching this cell, ranked by
+            # absolute drift from the base grid line.
+            candidates: list[tuple[int, str, int]] = []
+            for cut_idx in (col, col + 1):
+                if 0 < cut_idx < len(x_cuts) - 1 and x_from_band[cut_idx]:
+                    drift = abs(x_cuts[cut_idx] - base_x_cuts[cut_idx])
+                    candidates.append((drift, "x", cut_idx))
+            for cut_idx in (row, row + 1):
+                if 0 < cut_idx < len(y_cuts) - 1 and y_from_band[cut_idx]:
+                    drift = abs(y_cuts[cut_idx] - base_y_cuts[cut_idx])
+                    candidates.append((drift, "y", cut_idx))
+            if not candidates:
+                # No band cut to roll back; the grid estimator should have
+                # prevented this earlier, but if it slipped through we mark
+                # the chunk via over_safe_pixels downstream rather than loop.
+                break
+            candidates.sort(key=lambda item: -item[0])
+            _, axis, cut_idx = candidates[0]
+            if axis == "x":
+                x_cuts[cut_idx] = base_x_cuts[cut_idx]
+                x_from_band[cut_idx] = False
+            else:
+                y_cuts[cut_idx] = base_y_cuts[cut_idx]
+                y_from_band[cut_idx] = False
+
+        return x_cuts, x_from_band, y_cuts, y_from_band
+
     def _materialize(
         self,
         profile: ImageProfile,
@@ -453,6 +562,7 @@ class TableGridChunker:
             safe_max = self.table_cfg.safe_max_pixels
         hard_max = self.config.hard_max_pixels
 
+        stem = Path(profile.file_name).stem
         for entry in entries:
             bbox = entry["bbox"]
             row = entry["row"]
@@ -461,7 +571,7 @@ class TableGridChunker:
             cols = entry["cols"]
             cut_source = entry["cut_source"]
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
-            out_path = stem_dir / f"{cid}.jpg"
+            out_path = stem_dir / traceable_chunk_name(stem, row, col, bbox)
             _save_crop(profile.path, bbox, out_path)
 
             ovl = overlap_dict(
@@ -482,6 +592,8 @@ class TableGridChunker:
                 flags.append("over_hard_pixels")
             if cut_source == "grid" and (rows > 1 or cols > 1):
                 flags.append("fixed_cut")
+            if 0 < chunk_pixels < self.config.min_pixels:
+                flags.append("small_tail")
             seen: set[str] = set()
             unique_flags: list[str] = []
             for f in flags:
@@ -539,9 +651,12 @@ class PageChunker(TableGridChunker):
         content_height = max(1, cy1 - cy0)
         content_pixels = content_width * content_height
 
-        # Conservative safe_max for normal pages: reuse target_pixels as the
-        # soft ceiling; hard_max still gates worst-case via the grid estimator.
+        # Soft ceiling for grid fall-back uses target_pixels; hard_max gates
+        # worst-case via the grid estimator. Full-page chunks use
+        # full_page_max_pixels as their soft ceiling so a legitimate full page
+        # below the policy threshold is not flagged over_safe_pixels.
         normal_safe_max = max(1, normal_cfg.target_pixels)
+        full_page_safe_max = max(normal_safe_max, normal_cfg.full_page_max_pixels)
 
         if content_pixels <= normal_cfg.full_page_max_pixels:
             entries = [
@@ -561,7 +676,7 @@ class PageChunker(TableGridChunker):
                 content_box=content_box,
                 entries=entries,
                 chunk_policy="normal_page_v1",
-                safe_max=normal_safe_max,
+                safe_max=full_page_safe_max,
             )
 
         overlap_x = table_cfg.horizontal_overlap
@@ -589,6 +704,19 @@ class PageChunker(TableGridChunker):
             base_y_cuts,
             hints.horizontal_blank_bands,
             table_cfg.cut_search_px,
+        )
+
+        x_cuts, x_from_band, y_cuts, y_from_band = self._enforce_pixel_budget(
+            base_x_cuts=base_x_cuts,
+            base_y_cuts=base_y_cuts,
+            x_cuts=x_cuts,
+            x_from_band=x_from_band,
+            y_cuts=y_cuts,
+            y_from_band=y_from_band,
+            content_box=content_box,
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+            safe_max_pixels=normal_safe_max,
         )
 
         entries: list[dict] = []

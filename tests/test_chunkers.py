@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import yaml
 from PIL import Image
@@ -275,4 +276,122 @@ def test_normal_page_chunker_grids_when_exceeds_full_page(tmp_path):
 
     manifest = json.loads((tmp_path / "chunks" / "normal_big" / "manifest.json").read_text())
     assert manifest["chunk_policy"] == "normal_page_v1"
+
+
+def test_table_blank_band_adjustment_does_not_exceed_safe_max(tmp_path):
+    """Regression: blank-band shift used to enlarge a neighbouring cell past
+    safe_max once overlap was added. The chunker now rolls back offending
+    band cuts to keep every chunk_pixels <= safe_max."""
+    image_path = tmp_path / "table_band_safe.jpg"
+    Image.new("RGB", (6000, 4200), "white").save(image_path)
+    profile = _profile(image_path, 6000, 4200, "table_page")
+    # Reproduces a real review finding: with target/safe = 6M and a vertical
+    # band whose center sits at x=3020 (base x cut is 3000, so drift = +20px),
+    # the previous implementation produced a 3140x2320 = 7,284,800 pixel cell.
+    hints = LayoutHints(
+        (0, 0, 6000, 4200),
+        [],
+        [(2980, 3060)],
+        0.5,
+        1,
+    )
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 6_000_000,
+            "full_page_max_pixels": 1_000_000,
+            "horizontal_overlap": 160,
+            "vertical_overlap": 220,
+            "cut_search_px": 260,
+        }
+    })
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) > 1
+    for c in chunks:
+        assert c.chunk_pixels <= 6_000_000, (c.bbox, c.chunk_pixels)
+        assert "over_safe_pixels" not in c.risk_flags
+
+
+def test_chunk_image_path_uses_traceable_filename(tmp_path):
+    image_path = tmp_path / "trace.jpg"
+    Image.new("RGB", (2000, 1500), "white").save(image_path)
+    profile = _profile(image_path, 2000, 1500, "table_page")
+    hints = LayoutHints((0, 0, 2000, 1500), [], [], 0.5, 1)
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "target_pixels": 1_000_000,
+            "safe_max_pixels": 1_500_000,
+            "full_page_max_pixels": 500_000,
+            "horizontal_overlap": 60,
+            "vertical_overlap": 80,
+        }
+    })
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) > 1
+    for c in chunks:
+        name = c.image_path.name
+        x0, y0, x1, y1 = c.bbox
+        expected = f"trace__r{c.row}_c{c.col}__x{x0}_y{y0}_w{x1 - x0}_h{y1 - y0}.jpg"
+        assert name == expected
+    # Manifest paths should round-trip the same traceable basename.
+    manifest = json.loads((tmp_path / "chunks" / "trace" / "manifest.json").read_text())
+    for entry in manifest["chunks"]:
+        assert "__r" in Path(entry["image_path"]).name
+        assert "_w" in Path(entry["image_path"]).name
+
+
+def test_long_chunk_image_path_uses_traceable_filename(tmp_path):
+    image_path = tmp_path / "long_trace.jpg"
+    Image.new("RGB", (1500, 5000), "white").save(image_path)
+    profile = _profile(image_path, 1500, 5000, "long_strip")
+    hints = LayoutHints((0, 0, 1500, 5000), [], [], 0.0, 1)
+    chunks = LongStripChunker(
+        tmp_path / "chunks", window_height=2000, overlap=200
+    ).chunk(profile, hints)
+
+    assert len(chunks) >= 2
+    for c in chunks:
+        name = c.image_path.name
+        x0, y0, x1, y1 = c.bbox
+        expected = f"long_trace__r{c.row}_c{c.col}__x{x0}_y{y0}_w{x1 - x0}_h{y1 - y0}.jpg"
+        assert name == expected
+
+
+def test_normal_full_page_below_full_page_max_is_not_over_safe(tmp_path):
+    """Regression: a 9M normal full page (> normal.target_pixels=8M but <=
+    normal.full_page_max_pixels=12M) used to be tagged over_safe_pixels
+    because target_pixels was reused as the soft ceiling."""
+    image_path = tmp_path / "normal_9m.jpg"
+    # 3000x3000 = 9_000_000 pixels, between 8M target and 12M full_page_max.
+    Image.new("RGB", (3000, 3000), "white").save(image_path)
+    profile = _profile(image_path, 3000, 3000, "normal_page")
+    hints = LayoutHints((0, 0, 3000, 3000), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "normal": {"full_page_max_pixels": 12_000_000, "target_pixels": 8_000_000},
+    })
+    chunks = PageChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) == 1
+    assert chunks[0].cut_source == "full_page"
+    assert "over_safe_pixels" not in chunks[0].risk_flags
+
+
+def test_small_tail_flag_is_set_for_tiny_chunks(tmp_path):
+    """Regression: ChunkConfig.min_pixels was defined but unused. A chunk
+    smaller than min_pixels should be flagged with ``small_tail``."""
+    image_path = tmp_path / "tiny.jpg"
+    # Very small image well below any reasonable min_pixels threshold.
+    Image.new("RGB", (40, 40), "white").save(image_path)
+    profile = _profile(image_path, 40, 40, "normal_page")
+    hints = LayoutHints((0, 0, 40, 40), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "min_pixels": 4096,
+        "normal": {"full_page_max_pixels": 1_000_000, "target_pixels": 500_000},
+    })
+    chunks = PageChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) == 1
+    assert "small_tail" in chunks[0].risk_flags
 
