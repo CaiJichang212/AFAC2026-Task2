@@ -312,3 +312,64 @@ def test_config_rejects_invalid_image_concurrency(tmp_path, monkeypatch):
 
     with pytest.raises(ConfigError, match="runtime.image_concurrency must be >= 1"):
         load_config(args)
+
+
+def test_config_handles_empty_runtime_yaml_block(tmp_path, monkeypatch):
+    config_path = tmp_path / "default.yaml"
+    config_path.write_text(
+        """
+api:
+  url: "${FINIX_API_URL}"
+  timeout_seconds: 240
+  max_retries: 3
+  concurrency: 2
+  per_user_concurrency: 1
+chunk:
+  hard_max_pixels: 16777216
+  safe_max_pixels: 12000000
+  min_pixels: 4096
+  crop_margin_px: 24
+  long:
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
+    max_window_height: 4000
+    min_window_height: 1800
+    vertical_overlap: 320
+    blank_band_search_px: 360
+  table:
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
+    full_page_max_pixels: 8000000
+    horizontal_overlap: 160
+    vertical_overlap: 220
+    cut_search_px: 260
+  normal:
+    full_page_max_pixels: 12000000
+    target_pixels: 8000000
+merge:
+  dedup_similarity_threshold: 0.88
+quality:
+  max_duplication_ratio: 0.18
+  max_api_failure_ratio: 0.20
+  max_reruns_per_file: 2
+runtime:
+""",
+        encoding="utf-8",
+    )
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    monkeypatch.setenv("FINIX_API_KEY", "secret")
+    monkeypatch.setenv("FINIX_USER_IDS", "u1")
+
+    args = parse_args(
+        [
+            "--input_dir", str(input_dir),
+            "--output_csv", str(tmp_path / "submission.csv"),
+            "--work_dir", str(tmp_path / "work"),
+            "--config", str(config_path),
+        ]
+    )
+
+    config = load_config(args)
+
+    assert config.runtime["image_concurrency"] == 1

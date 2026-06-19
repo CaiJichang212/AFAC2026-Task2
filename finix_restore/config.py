@@ -94,7 +94,8 @@ def load_config(args) -> RunConfig:
     api["concurrency"] = min(requested, max(1, len(user_ids) * per_user))
     api["per_user_concurrency"] = per_user
 
-    runtime = {"image_concurrency": int(raw.get("runtime", {}).get("image_concurrency", 1))}
+    runtime_raw = raw.get("runtime") or {}
+    runtime = {"image_concurrency": int(runtime_raw.get("image_concurrency", 1))}
     cli_image_concurrency = getattr(args, "image_concurrency", None)
     if cli_image_concurrency is not None:
         runtime["image_concurrency"] = int(cli_image_concurrency)
