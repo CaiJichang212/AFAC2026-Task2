@@ -175,7 +175,6 @@ class Pipeline:
         return client.parse_chunks(chunks, force_api=force_api)
 
     def _chunk(self, profile: ImageProfile, hints: LayoutHints):
-        chunk_cfg = self.config.chunk
         if profile.doc_type == "long_strip":
             chunker = LongStripChunker(
                 self.config.paths.chunks_dir,
@@ -189,10 +188,7 @@ class Pipeline:
         else:
             chunker = PageChunker(
                 self.config.paths.chunks_dir,
-                max_chunk_pixels=int(chunk_cfg.get("max_chunk_pixels", 12_000_000)),
-                full_page_max_pixels=int(chunk_cfg.get("table_full_page_max_pixels", 16_000_000)),
-                horizontal_overlap=int(chunk_cfg.get("table_horizontal_overlap", 160)),
-                vertical_overlap=int(chunk_cfg.get("table_vertical_overlap", 220)),
+                config=self.config.chunk,
             )
         return chunker.chunk(profile, hints)
 

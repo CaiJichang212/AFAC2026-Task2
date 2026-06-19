@@ -4,7 +4,7 @@ import yaml
 from PIL import Image
 
 from finix_restore.chunk_config import ChunkConfig
-from finix_restore.chunkers import LongStripChunker, TableGridChunker
+from finix_restore.chunkers import LongStripChunker, PageChunker, TableGridChunker
 from finix_restore.layout_sentry import LayoutHints
 from finix_restore.models import ImageProfile
 
@@ -237,3 +237,42 @@ def test_long_cut_adjusts_to_horizontal_blank_band(tmp_path):
 
     assert chunks[0].bbox[3] == 3190
     assert chunks[0].cut_source == "blank_band"
+
+
+def test_normal_page_chunker_prefers_full_page(tmp_path):
+    image_path = tmp_path / "normal.jpg"
+    Image.new("RGB", (3000, 3000), "white").save(image_path)
+    profile = _profile(image_path, 3000, 3000, "normal_page")
+    hints = LayoutHints((0, 0, 3000, 3000), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "normal": {"full_page_max_pixels": 12_000_000, "target_pixels": 8_000_000},
+    })
+    chunks = PageChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) == 1
+    assert chunks[0].cut_source == "full_page"
+    assert chunks[0].bbox == (0, 0, 3000, 3000)
+
+    manifest = json.loads((tmp_path / "chunks" / "normal" / "manifest.json").read_text())
+    assert manifest["chunk_policy"] == "normal_page_v1"
+
+
+def test_normal_page_chunker_grids_when_exceeds_full_page(tmp_path):
+    image_path = tmp_path / "normal_big.jpg"
+    Image.new("RGB", (5000, 4000), "white").save(image_path)  # 20M > 12M
+    profile = _profile(image_path, 5000, 4000, "normal_page")
+    hints = LayoutHints((0, 0, 5000, 4000), [], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "normal": {"full_page_max_pixels": 12_000_000, "target_pixels": 8_000_000},
+        "table": {"horizontal_overlap": 100, "vertical_overlap": 100},
+    })
+    chunks = PageChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) > 1
+    for c in chunks:
+        # 不超过 cfg.hard_max_pixels (16777216)
+        assert c.chunk_pixels <= 16_777_216
+
+    manifest = json.loads((tmp_path / "chunks" / "normal_big" / "manifest.json").read_text())
+    assert manifest["chunk_policy"] == "normal_page_v1"
+

@@ -259,7 +259,13 @@ class TableGridChunker:
                     "vertical_overlap": 0,
                 }
             ]
-            return self._materialize(profile, content_box=content_box, entries=entries)
+            return self._materialize(
+                profile,
+                content_box=content_box,
+                entries=entries,
+                chunk_policy="table_grid_v2",
+                safe_max=table_cfg.safe_max_pixels,
+            )
 
         overlap_x = table_cfg.horizontal_overlap
         overlap_y = table_cfg.vertical_overlap
@@ -333,7 +339,13 @@ class TableGridChunker:
                     }
                 )
 
-        return self._materialize(profile, content_box=content_box, entries=entries)
+        return self._materialize(
+            profile,
+            content_box=content_box,
+            entries=entries,
+            chunk_policy="table_grid_v2",
+            safe_max=table_cfg.safe_max_pixels,
+        )
 
     def _resolve_content_box(
         self,
@@ -429,13 +441,16 @@ class TableGridChunker:
         profile: ImageProfile,
         content_box: tuple[int, int, int, int],
         entries: list[dict],
+        chunk_policy: str = "table_grid_v2",
+        safe_max: int | None = None,
     ) -> list[Chunk]:
         stem_dir = self.chunks_dir / Path(profile.file_name).stem
         stem_dir.mkdir(parents=True, exist_ok=True)
         image_sha1 = _file_sha1(profile.path)
         chunks: list[Chunk] = []
 
-        safe_max = self.table_cfg.safe_max_pixels
+        if safe_max is None:
+            safe_max = self.table_cfg.safe_max_pixels
         hard_max = self.config.hard_max_pixels
 
         for entry in entries:
@@ -497,10 +512,133 @@ class TableGridChunker:
             profile,
             chunks,
             content_box=content_box,
-            chunk_policy="table_grid_v2",
+            chunk_policy=chunk_policy,
         )
         return chunks
 
 
 class PageChunker(TableGridChunker):
-    pass
+    """Normal-page chunker: prefer one full-page chunk, fall back to a light grid.
+
+    Inherits TableGridChunker for grid helpers (_estimate_grid_shape /
+    _adjust_cuts / _resolve_content_box / _materialize) but overrides chunk()
+    to use the ``normal`` config section and a ``normal_page_v1`` policy.
+    The legacy 4-positional constructor (max_chunk_pixels / full_page_max_pixels
+    / horizontal_overlap / vertical_overlap) is preserved for callers that
+    have not yet migrated to ``config=``.
+    """
+
+    def chunk(self, profile: ImageProfile, hints: LayoutHints) -> list[Chunk]:
+        cfg = self.config
+        normal_cfg = cfg.normal
+        table_cfg = self.table_cfg
+
+        content_box = self._resolve_content_box(profile, hints)
+        cx0, cy0, cx1, cy1 = content_box
+        content_width = max(1, cx1 - cx0)
+        content_height = max(1, cy1 - cy0)
+        content_pixels = content_width * content_height
+
+        # Conservative safe_max for normal pages: reuse target_pixels as the
+        # soft ceiling; hard_max still gates worst-case via the grid estimator.
+        normal_safe_max = max(1, normal_cfg.target_pixels)
+
+        if content_pixels <= normal_cfg.full_page_max_pixels:
+            entries = [
+                {
+                    "bbox": content_box,
+                    "row": 0,
+                    "col": 0,
+                    "rows": 1,
+                    "cols": 1,
+                    "cut_source": "full_page",
+                    "horizontal_overlap": 0,
+                    "vertical_overlap": 0,
+                }
+            ]
+            return self._materialize(
+                profile,
+                content_box=content_box,
+                entries=entries,
+                chunk_policy="normal_page_v1",
+                safe_max=normal_safe_max,
+            )
+
+        overlap_x = table_cfg.horizontal_overlap
+        overlap_y = table_cfg.vertical_overlap
+
+        rows, cols = self._estimate_grid_shape(
+            width=content_width,
+            height=content_height,
+            target_pixels=max(1, normal_cfg.target_pixels),
+            safe_max_pixels=normal_safe_max,
+            hard_max_pixels=max(1, cfg.hard_max_pixels),
+            overlap_x=overlap_x,
+            overlap_y=overlap_y,
+        )
+
+        base_x_cuts = [cx0 + (i * content_width) // cols for i in range(cols)] + [cx1]
+        base_y_cuts = [cy0 + (i * content_height) // rows for i in range(rows)] + [cy1]
+
+        x_cuts, x_from_band = self._adjust_cuts(
+            base_x_cuts,
+            hints.vertical_blank_bands,
+            table_cfg.cut_search_px,
+        )
+        y_cuts, y_from_band = self._adjust_cuts(
+            base_y_cuts,
+            hints.horizontal_blank_bands,
+            table_cfg.cut_search_px,
+        )
+
+        entries: list[dict] = []
+        for row in range(rows):
+            base_y0 = y_cuts[row]
+            base_y1 = y_cuts[row + 1]
+            top_band = y_from_band[row]
+            bottom_band = y_from_band[row + 1]
+            for col in range(cols):
+                base_x0 = x_cuts[col]
+                base_x1 = x_cuts[col + 1]
+                left_band = x_from_band[col]
+                right_band = x_from_band[col + 1]
+
+                x0 = max(cx0, base_x0 - (overlap_x if col > 0 else 0))
+                x1 = min(cx1, base_x1 + (overlap_x if col < cols - 1 else 0))
+                y0 = max(cy0, base_y0 - (overlap_y if row > 0 else 0))
+                y1 = min(cy1, base_y1 + (overlap_y if row < rows - 1 else 0))
+                if x1 <= x0:
+                    x1 = min(cx1, x0 + 1)
+                if y1 <= y0:
+                    y1 = min(cy1, y0 + 1)
+
+                cell_uses_band = any(
+                    (
+                        col > 0 and left_band,
+                        col < cols - 1 and right_band,
+                        row > 0 and top_band,
+                        row < rows - 1 and bottom_band,
+                    )
+                )
+                cut_source = "blank_band" if cell_uses_band else "grid"
+
+                entries.append(
+                    {
+                        "bbox": (x0, y0, x1, y1),
+                        "row": row,
+                        "col": col,
+                        "rows": rows,
+                        "cols": cols,
+                        "cut_source": cut_source,
+                        "horizontal_overlap": overlap_x,
+                        "vertical_overlap": overlap_y,
+                    }
+                )
+
+        return self._materialize(
+            profile,
+            content_box=content_box,
+            entries=entries,
+            chunk_policy="normal_page_v1",
+            safe_max=normal_safe_max,
+        )
