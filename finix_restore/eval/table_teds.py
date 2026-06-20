@@ -27,8 +27,10 @@ def _tree_size(node: TableNode) -> int:
     return 1 + sum(_tree_size(child) for child in node.children)
 
 
-# 超过该节点数的表改用近似法，避免 APTED 在超大表上的高耗时。
-LARGE_TABLE_NODE_THRESHOLD = 800
+# 超过该节点数的表改用近似法，避免 APTED 在大表上的高耗时。
+# 真实金融表实测：600-700 节点的精确 APTED 已需 2-11s，而近似仅毫秒级且分数接近，
+# 故阈值取较小值，仅极小表用精确 APTED，其余走近似。
+LARGE_TABLE_NODE_THRESHOLD = 200
 
 
 def _cell_signatures(tree: TableNode) -> list[str]:
