@@ -1,3 +1,5 @@
+import csv
+
 from finix_restore.eval.io import load_pairs
 
 
@@ -52,3 +54,21 @@ def test_load_pairs_dir_with_mapping(tmp_path):
     assert pairs == [("afts-1.png", "pred-text", "gt-text")]
     assert missing_gt == []
     assert missing_pred == []
+
+
+def test_load_pairs_handles_huge_ground_truth_field(tmp_path):
+    huge = "a" * 200001
+    pred = tmp_path / "pred.csv"
+    gt = tmp_path / "gt.csv"
+    for path in (pred, gt):
+        with path.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(["file_name", "ground_truth"])
+            writer.writerow(["big.png", huge])
+
+    pairs, missing_gt, missing_pred = load_pairs(pred, gt)
+
+    assert len(pairs) == 1
+    assert pairs[0][0] == "big.png"
+    assert pairs[0][1] == pairs[0][2]
+    assert len(pairs[0][1]) > 200000

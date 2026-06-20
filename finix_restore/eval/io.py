@@ -1,7 +1,22 @@
 from __future__ import annotations
 
 import csv
+import sys
 from pathlib import Path
+
+
+def _raise_csv_field_limit() -> None:
+    # ground_truth 字段为整篇 Markdown，可能超过 csv 默认 131072 上限。
+    limit = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(limit)
+            break
+        except OverflowError:
+            limit //= 2
+
+
+_raise_csv_field_limit()
 
 
 def _read_submission_csv(path) -> dict[str, str]:
