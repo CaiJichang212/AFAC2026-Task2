@@ -75,3 +75,19 @@ def test_approx_teds_branch_returns_reasonable_value():
     pred_tree = extract_tables(_build_big_table(third_cell="z"))[0]
     score = _approx_teds(pred_tree, tree)
     assert 0.0 < score < 100.0
+
+
+def test_huge_table_approximation_is_fast():
+    # 1 table + 4000 tr + 12000 td = 16001 节点，远超阈值，必须走 rapidfuzz 近似分支。
+    big = (
+        "<table>"
+        + "".join(
+            "<tr><td>a</td><td>b</td><td>c</td></tr>" for _ in range(4000)
+        )
+        + "</table>"
+    )
+    start = time.perf_counter()
+    score = table_teds(big, big)
+    elapsed = time.perf_counter() - start
+    assert score == 100.0
+    assert elapsed < 2.0

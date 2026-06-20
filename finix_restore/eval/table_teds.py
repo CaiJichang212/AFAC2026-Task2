@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from apted import APTED, Config
+from rapidfuzz.distance import Levenshtein
 
 from finix_restore.eval.tables import TableNode, extract_tables
 
@@ -38,26 +39,13 @@ def _cell_signatures(tree: TableNode) -> list[str]:
     return signatures
 
 
-def _seq_levenshtein(seq_a: list[str], seq_b: list[str]) -> int:
-    # 较短序列放内层，降低 DP 内层循环规模。
-    if len(seq_a) < len(seq_b):
-        seq_a, seq_b = seq_b, seq_a
-    prev = list(range(len(seq_b) + 1))
-    for i, a in enumerate(seq_a, start=1):
-        curr = [i]
-        for j, b in enumerate(seq_b, start=1):
-            cost = 0 if a == b else 1
-            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost))
-        prev = curr
-    return prev[-1]
-
-
 def _approx_teds(pred_tree: TableNode, gt_tree: TableNode) -> float:
     pred_seq = _cell_signatures(pred_tree)
     gt_seq = _cell_signatures(gt_tree)
     if not pred_seq and not gt_seq:
         return 100.0
-    distance = _seq_levenshtein(pred_seq, gt_seq)
+    # 用 rapidfuzz 的 C++ 实现按元素比较序列编辑距离，避免纯 Python DP 在超大表上耗时。
+    distance = Levenshtein.distance(pred_seq, gt_seq)
     loss = distance / max(1, max(len(pred_seq), len(gt_seq)))
     return (1 - loss) * 100
 
