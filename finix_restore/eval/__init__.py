@@ -1,3 +1,5 @@
 from __future__ import annotations
 
-# Public API (evaluate, score_pair) is wired up in a later task.
+from finix_restore.eval.scorer import evaluate, score_pair
+
+__all__ = ["evaluate", "score_pair"]
