@@ -8,1016 +8,286 @@
 
 **Tech Stack:** Python 3，`apted`（树编辑距离，新增依赖），`beautifulsoup4`/`lxml`（HTML 表格解析，已有），`pytest`（已有）。
 
+**评分公式（验收基准）：**
+
+```
+Overall = [ (1 - Text Edit) * 100 + Table TEDS + (1 - Read Order Edit) * 100 ] / 3
+```
+
 ---
 
 ## 文件结构
 
-- 新建 `finix_restore/eval/__init__.py` —— 导出公共入口（`evaluate`, `score_pair`）。
-- 新建 `finix_restore/eval/text_metric.py` —— Text Edit：文本归一化 + 字级 Levenshtein 归一化。
-- 新建 `finix_restore/eval/tables.py` —— 表格抽取（HTML `<table>` + Markdown pipe→HTML）并解析为树节点。
-- 新建 `finix_restore/eval/table_teds.py` —— 基于 `apted` 的 TEDS 得分。
-- 新建 `finix_restore/eval/reading_order.py` —— Read Order Edit：逻辑块切分 + 块级 Levenshtein 归一化。
-- 新建 `finix_restore/eval/io.py` —— 读取预测/GT（CSV 或 id_mapping+mds 目录），对齐成 (file_name, pred, gt) 三元组。
-- 新建 `finix_restore/eval/scorer.py` —— 合成 Overall，聚合每文件明细 + 数据集汇总，写 JSON。
-- 新建 `finix_restore/eval/cli.py` —— 命令行入口。
-- 新建测试：`tests/test_eval_text_metric.py`、`tests/test_eval_tables.py`、`tests/test_eval_table_teds.py`、`tests/test_eval_reading_order.py`、`tests/test_eval_io.py`、`tests/test_eval_scorer.py`、`tests/test_eval_cli.py`。
-- 修改 `requirements.txt` —— 新增 `apted`。
+| 文件 | 职责 |
+|:---|:---|
+| `finix_restore/eval/__init__.py` | 导出公共入口 `evaluate`, `score_pair` |
+| `finix_restore/eval/text_metric.py` | Text Edit：文本归一化 + 字级 Levenshtein 归一化 |
+| `finix_restore/eval/tables.py` | 表格抽取（HTML `<table>` + Markdown pipe→HTML）→ `TableNode` 树 |
+| `finix_restore/eval/table_teds.py` | 基于 `apted` 的 TEDS 得分 |
+| `finix_restore/eval/reading_order.py` | Read Order Edit：逻辑块切分 + 块级 Levenshtein 归一化 |
+| `finix_restore/eval/io.py` | 读取预测/GT（CSV 或 id_mapping+mds 目录），对齐三元组 |
+| `finix_restore/eval/scorer.py` | 合成 Overall，聚合每文件明细 + 数据集汇总，写 JSON |
+| `finix_restore/eval/cli.py` | 命令行入口 |
+| `tests/test_eval_*.py` | 各模块单测（每模块一个文件） |
+| `requirements.txt` | 新增 `apted` |
+
+---
+
+## 接口契约
+
+实现时必须严格遵守以下签名与语义；测试与下游模块据此对接。所有度量值方向：Text Edit / Read Order Edit ∈ [0,1]（越低越好），Table TEDS ∈ [0,100]（越高越好）。
+
+**text_metric.py**
+- `normalize_text(text: str) -> str`：统一 `\r\n`/`\r` 为 `\n`；逐行将连续空格/制表压为单空格并去行首尾空白；最后去整体首尾空白。
+- `text_edit(pred: str, gt: str) -> float`：对归一化后的两串求字级 Levenshtein，除以 `max(1, len(gt_norm))`。相同串返回 `0.0`；gt 为空时分母取 1。
+
+**tables.py**
+- `TableNode`（dataclass）：字段 `tag: str`、`text: str=""`、`colspan: int=1`、`rowspan: int=1`、`children: list[TableNode]`。
+- `extract_tables(markdown: str) -> list[TableNode]`：返回文档内全部表格树，按出现顺序；先收 HTML `<table>`，再收 Markdown pipe 表格（转 HTML 后解析）；无表返回 `[]`。单元格文本经空白归一化。
+
+**table_teds.py**
+- `has_any_table(pred: str, gt: str) -> bool`：任一侧含表即 `True`。
+- `table_teds(pred: str, gt: str) -> float | None`：双方均无表返回 `None`；否则逐表按出现顺序配对，缺失配对的多余表该表得 0，取所有表得分均值。单表 TEDS 见下方公式契约。
+
+**reading_order.py**
+- `split_blocks(text: str) -> list[str]`：按空行切块，每块产出身份签名 `"{kind}:{md5前12位}"`，`kind ∈ {h(标题), t(表格), l(列表), p(段落)}`。
+- `read_order_edit(pred: str, gt: str) -> float`：对两个签名序列求序列级 Levenshtein，除以 `max(1, len(gt_blocks))`。
+
+**io.py**
+- `load_pairs(pred_path, gt_path, mapping_csv=None) -> tuple[list[tuple[str,str,str]], list[str], list[str]]`
+  - 返回 `(pairs, missing_gt, missing_pred)`，`pairs` 元素为 `(file_name, pred_text, gt_text)`，按 file_name 升序。
+  - 预测必须是官方 CSV（列 `file_name`, `ground_truth`）；列缺失抛 `ValueError`。
+  - GT 为 CSV 时同格式；GT 为目录时配合 `mapping_csv`（`uuid,afts_id`）将预测文件名映射到 `{uuid}.md`。
+  - `missing_gt`：预测有而 GT 无；`missing_pred`：GT 有而预测无（仅 GT 为 CSV 时可计算，目录模式为 `[]`）。
+
+**scorer.py**
+- `score_pair(file_name: str, pred: str, gt: str) -> dict`：键含 `file_name, text_edit, table_teds(可为None), read_order_edit, has_table(bool), overall`。无表样本 `overall` 中表格分量取 100。
+- `evaluate(pred_path, gt_path, mapping_csv=None, output=None) -> dict`：聚合报告，键含 `file_count, missing_gt, missing_pred, mean_text_edit, mean_read_order_edit, mean_table_teds, table_sample_count, mean_overall, files`。`mean_table_teds` 仅统计 `has_table` 为真的样本。`output` 非空时写 JSON。
+
+**cli.py**
+- `main(argv: list[str] | None = None) -> int`：参数 `--pred`（必填）、`--gt`（必填，CSV 或目录）、`--mapping_csv`（目录模式用）、`--output`（必填）。打印各项均值与 Overall，返回 0。
+
+### 关键公式契约（易误解，固化于此）
+
+单表 TEDS（归一化为百分制）：
+
+```
+TEDS_single = (1 - tree_edit_distance / max(size(pred_tree), size(gt_tree))) * 100
+```
+
+其中 `size` 为树的节点总数；`max(size)==0` 时记 100。APTED 的 `rename` 代价：`tag` 不同记 1；`tag=="td"` 且 `(text, colspan, rowspan)` 完全相同记 0、否则 1；其余同标签节点记 0。
+
+---
+
+## 决策与约束（来自设计评审）
+
+- 输入对齐官方 CSV，同时兼容训练集 `id_mapping.csv + mds/`。
+- TEDS 复用 `apted`（新增依赖），表格解析复用 bs4/lxml。
+- 无表样本：`mean_table_teds` 仅含表样本参与；单文件 `overall` 中无表样本表格分量取 100（报告显式标注口径）。
+- 独立评测模块 + CLI，不绑定主 pipeline；不改 `data/`、不调外部模型 API。
+- GT 表格实测以 HTML `<table>`（含 `rowspan`/`colspan`）为主，Markdown pipe 为辅 —— 解析以 HTML 为主路径。
+
+---
+
+## 分支与 PR
+
+- 本计划在独立分支实现（如 `feat/offline-scoring`），每个 Task 一次提交，便于回溯。
+- 全部 Task 完成且 `pytest -q`、`ruff check` 通过后，发起 PR 合入；**完整实现源码以 PR diff 为准，不回填本计划文档**。
+- PR 描述引用本计划与设计文档路径，列出新增模块与验收结果。
 
 ---
 
 ## Task 1: 新增 apted 依赖与 eval 包骨架
 
-**Files:**
-- Modify: `requirements.txt`
-- Create: `finix_restore/eval/__init__.py`
+**Files:** Modify `requirements.txt`；Create `finix_restore/eval/__init__.py`
 
-- [ ] **Step 1: 在 requirements.txt 末尾新增 apted**
-
-`requirements.txt` 当前内容为（pillow/numpy/pandas/requests/python-dotenv/PyYAML/beautifulsoup4/lxml/pytest/ruff）。在文件末尾追加一行：
-
-```
-apted
-```
-
-- [ ] **Step 2: 安装依赖**
-
-Run: `pip install apted`
-Expected: 成功安装 apted（纯 Python，无编译）。
-
-- [ ] **Step 3: 创建空的包初始化文件**
-
-创建 `finix_restore/eval/__init__.py`，内容为：
-
-```python
-from __future__ import annotations
-
-# Public API is wired up in later tasks (scorer.evaluate, scorer.score_pair).
-```
-
-- [ ] **Step 4: 验证包可导入**
-
-Run: `python -c "import finix_restore.eval"`
-Expected: 无输出、退出码 0。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add requirements.txt finix_restore/eval/__init__.py
-git commit -m "chore: add apted dep and eval package skeleton"
-```
+- [ ] **Step 1:** `requirements.txt` 末尾追加一行 `apted`。
+- [ ] **Step 2:** 安装依赖。Run: `pip install apted`，Expected: 成功（纯 Python，无编译）。
+- [ ] **Step 3:** 创建 `finix_restore/eval/__init__.py`（先留空占位，Task 7 再补导出）。
+- [ ] **Step 4:** 验证可导入。Run: `python -c "import finix_restore.eval"`，Expected: 退出码 0。
+- [ ] **Step 5:** 提交。`git commit -m "chore: add apted dep and eval package skeleton"`
 
 ---
 
 ## Task 2: Text Edit 指标
 
-**Files:**
-- Create: `finix_restore/eval/text_metric.py`
-- Test: `tests/test_eval_text_metric.py`
+**Files:** Create `finix_restore/eval/text_metric.py`；Test `tests/test_eval_text_metric.py`（TDD：先写失败测试）
 
-- [ ] **Step 1: 写失败测试**
+**实现要点：** 实现 `normalize_text` 与 `text_edit`（签名见接口契约）。Levenshtein 用标准 DP（短串做内层以省内存）。
 
-创建 `tests/test_eval_text_metric.py`：
+**测试用例（验收）：**
+- `normalize_text("  a\r\nb \t c \n")` == `"a\nb c"`
+- `text_edit("abc","abc")` == `0.0`
+- `text_edit("abcd","abxd")` == `0.25`（gt 长 4，1 次替换）
+- `text_edit("a","")` == `1.0`（空 gt 分母取 1）
 
-```python
-from finix_restore.eval.text_metric import normalize_text, text_edit
-
-
-def test_normalize_collapses_whitespace_and_strips():
-    assert normalize_text("  a\r\nb \t c \n") == "a\nb c"
-
-
-def test_text_edit_identical_is_zero():
-    assert text_edit("abc", "abc") == 0.0
-
-
-def test_text_edit_one_substitution_normalized_by_gt_length():
-    # gt="abxd" len=4, pred="abcd" -> 1 substitution -> 1/4
-    assert text_edit("abcd", "abxd") == 0.25
-
-
-def test_text_edit_empty_gt_uses_len_one_denominator():
-    assert text_edit("a", "") == 1.0
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_text_metric.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.text_metric）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/text_metric.py`：
-
-```python
-from __future__ import annotations
-
-import re
-
-
-def _levenshtein(a: str, b: str) -> int:
-    if a == b:
-        return 0
-    if len(a) < len(b):
-        a, b = b, a
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        current = [i]
-        for j, cb in enumerate(b, start=1):
-            insert = current[j - 1] + 1
-            delete = previous[j] + 1
-            replace = previous[j - 1] + (ca != cb)
-            current.append(min(insert, delete, replace))
-        previous = current
-    return previous[-1]
-
-
-def normalize_text(text: str) -> str:
-    # 统一换行，将连续空白（不含换行结构）压缩为单空格，逐行去首尾空白后去整体首尾空白。
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = []
-    for line in text.split("\n"):
-        line = re.sub(r"[ \t\f\v]+", " ", line).strip()
-        lines.append(line)
-    return "\n".join(lines).strip()
-
-
-def text_edit(pred: str, gt: str) -> float:
-    pred_n = normalize_text(pred)
-    gt_n = normalize_text(gt)
-    distance = _levenshtein(pred_n, gt_n)
-    return distance / max(1, len(gt_n))
-```
-
-- [ ] **Step 4: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_text_metric.py -v`
-Expected: 4 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/text_metric.py tests/test_eval_text_metric.py
-git commit -m "feat(eval): add Text Edit normalized levenshtein metric"
-```
+**步骤：**
+- [ ] **Step 1:** 写上述失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_text_metric.py -v`，Expected: FAIL（模块不存在）。
+- [ ] **Step 3:** 实现 `text_metric.py`。
+- [ ] **Step 4:** Run 同上，Expected: 全部 passed。
+- [ ] **Step 5:** 提交 `feat(eval): add Text Edit normalized levenshtein metric`。
 
 ---
 
 ## Task 3: 表格抽取与树构建
 
-**Files:**
-- Create: `finix_restore/eval/tables.py`
-- Test: `tests/test_eval_tables.py`
+**Files:** Create `finix_restore/eval/tables.py`；Test `tests/test_eval_tables.py`
 
-说明：GT 表格主要是 HTML `<table>`（含 `rowspan`/`colspan`），少量可能是 Markdown pipe 表格。本任务把两种形态统一抽取为 `TableNode` 树，供 TEDS 使用。
+**实现要点：**
+- `TableNode` dataclass（字段见契约）。
+- HTML 路径：用 `BeautifulSoup(markdown, "lxml")` 找全部 `<table>`，逐 `<tr>` 收 `<td>/<th>` 为子节点；`colspan/rowspan` 解析为 `int`（非法/缺省取 1）；单元格文本 `get_text(" ", strip=True)` 后空白归一。
+- Markdown 路径：识别"表头行 + 分隔行（`|:- |` 组成）+ 若干数据行"的连续块，转为 `<table>` 字符串后复用 HTML 解析。
 
-- [ ] **Step 1: 写失败测试**
-
-创建 `tests/test_eval_tables.py`：
-
-```python
-from finix_restore.eval.tables import extract_tables, TableNode
-
-
-def test_extract_html_table_builds_tree_with_spans():
-    md = (
-        "intro\n"
-        "<table><tr><td rowspan=\"2\">A</td><td colspan=\"2\">B</td></tr>"
-        "<tr><td>C</td><td>D</td></tr></table>\n"
-        "outro"
-    )
-    trees = extract_tables(md)
-    assert len(trees) == 1
-    root = trees[0]
-    assert isinstance(root, TableNode)
-    assert root.tag == "table"
-    assert len(root.children) == 2  # two rows
-    first_row = root.children[0]
-    assert first_row.tag == "tr"
-    assert first_row.children[0].tag == "td"
-    assert first_row.children[0].text == "A"
-    assert first_row.children[0].rowspan == 2
-    assert first_row.children[1].colspan == 2
-
-
-def test_extract_markdown_pipe_table_converted_to_tree():
-    md = "| h1 | h2 |\n|---|---|\n| a | b |\n"
-    trees = extract_tables(md)
-    assert len(trees) == 1
-    root = trees[0]
-    assert root.tag == "table"
-    # header row + body row
-    assert len(root.children) == 2
-    assert root.children[0].children[0].text == "h1"
-    assert root.children[1].children[1].text == "b"
-
-
-def test_no_table_returns_empty_list():
-    assert extract_tables("# title\nplain paragraph") == []
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_tables.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.tables）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/tables.py`：
+**关键转换规则（易误解，保留小片段）** —— Markdown 分隔行判定与单元格切分：
 
 ```python
-from __future__ import annotations
-
-import re
-from dataclasses import dataclass, field
-
-from bs4 import BeautifulSoup
-
-
-@dataclass
-class TableNode:
-    tag: str
-    text: str = ""
-    colspan: int = 1
-    rowspan: int = 1
-    children: list["TableNode"] = field(default_factory=list)
-
-
-def _cell_node(cell) -> TableNode:
-    def _span(attr: str) -> int:
-        try:
-            return max(1, int(cell.get(attr, "1")))
-        except (TypeError, ValueError):
-            return 1
-
-    text = re.sub(r"\s+", " ", cell.get_text(" ", strip=True)).strip()
-    return TableNode(tag="td", text=text, colspan=_span("colspan"), rowspan=_span("rowspan"))
-
-
-def _html_table_to_node(table) -> TableNode:
-    root = TableNode(tag="table")
-    for row in table.find_all("tr"):
-        row_node = TableNode(tag="tr")
-        for cell in row.find_all(["td", "th"]):
-            row_node.children.append(_cell_node(cell))
-        root.children.append(row_node)
-    return root
-
-
-def _markdown_tables_to_html(markdown: str) -> list[str]:
-    html_tables: list[str] = []
-    lines = markdown.split("\n")
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        is_row = line.startswith("|") and line.endswith("|")
-        sep = i + 1 < len(lines) and re.fullmatch(r"\|[:\- |]+\|", lines[i + 1].strip() or "")
-        if is_row and sep:
-            block = [lines[i].strip(), lines[i + 1].strip()]
-            j = i + 2
-            while j < len(lines) and lines[j].strip().startswith("|"):
-                block.append(lines[j].strip())
-                j += 1
-            html_tables.append(_one_markdown_table_to_html(block))
-            i = j
-        else:
-            i += 1
-    return html_tables
-
-
-def _split_cells(row: str) -> list[str]:
-    return [c.strip() for c in row.strip().strip("|").split("|")]
-
-
-def _one_markdown_table_to_html(block: list[str]) -> str:
-    header = _split_cells(block[0])
-    body_rows = [_split_cells(r) for r in block[2:]]
-    rows_html = ["<tr>" + "".join(f"<td>{c}</td>" for c in header) + "</tr>"]
-    for row in body_rows:
-        rows_html.append("<tr>" + "".join(f"<td>{c}</td>" for c in row) + "</tr>")
-    return "<table>" + "".join(rows_html) + "</table>"
-
-
-def extract_tables(markdown: str) -> list[TableNode]:
-    nodes: list[TableNode] = []
-    soup = BeautifulSoup(markdown, "lxml")
-    for table in soup.find_all("table"):
-        nodes.append(_html_table_to_node(table))
-    for html in _markdown_tables_to_html(markdown):
-        sub = BeautifulSoup(html, "lxml")
-        table = sub.find("table")
-        if table is not None:
-            nodes.append(_html_table_to_node(table))
-    return nodes
+sep = re.fullmatch(r"\|[:\- |]+\|", line.strip())          # 分隔行
+cells = [c.strip() for c in row.strip().strip("|").split("|")]  # 单元格
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+**测试用例（验收）：**
+- HTML 表：含 `rowspan="2"` 与 `colspan="2"` 的两行表，断言根 `tag=="table"`、行数、首格 `text/rowspan/colspan`。
+- Markdown pipe 表：表头 + 一行数据，断言转为 2 行、首格与末格文本正确。
+- 无表文本：`extract_tables(...)` 返回 `[]`。
 
-Run: `pytest tests/test_eval_tables.py -v`
-Expected: 3 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/tables.py tests/test_eval_tables.py
-git commit -m "feat(eval): extract HTML and markdown tables into node trees"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_tables.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `tables.py`。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): extract HTML and markdown tables into node trees`。
 
 ---
 
 ## Task 4: Table TEDS 指标
 
-**Files:**
-- Create: `finix_restore/eval/table_teds.py`
-- Test: `tests/test_eval_table_teds.py`
+**Files:** Create `finix_restore/eval/table_teds.py`；Test `tests/test_eval_table_teds.py`
 
-说明：用 `apted` 计算两棵 `TableNode` 树的编辑距离，按 TEDS 标准归一化为 [0,100]。`has_table` 用于上层判断该样本是否计入 Table TEDS 均值。
+**实现要点：**
+- 用 `apted.APTED` + 自定义 `Config`：`children(node)` 返回 `node.children`；`rename` 代价按接口契约的「关键公式契约」实现。
+- `size(tree)` 递归数节点；单表 TEDS 用归一化公式。
+- `table_teds`：双方无表返回 `None`；逐表配对、缺配对计 0、取均值。`has_any_table` 任一侧有表即真。
 
-- [ ] **Step 1: 写失败测试**
+**测试用例（验收）：**
+- 相同表 → `100.0`。
+- 仅单元格文本不同 → `0 < score < 100`。
+- 双方无表 → `None`。
+- `has_any_table`：一侧有表→`True`，双方无表→`False`。
 
-创建 `tests/test_eval_table_teds.py`：
-
-```python
-from finix_restore.eval.table_teds import table_teds, has_any_table
-
-
-def test_identical_tables_score_100():
-    md = "<table><tr><td>A</td><td>B</td></tr><tr><td>C</td><td>D</td></tr></table>"
-    score = table_teds(md, md)
-    assert score == 100.0
-
-
-def test_cell_text_difference_lowers_score():
-    pred = "<table><tr><td>A</td><td>X</td></tr></table>"
-    gt = "<table><tr><td>A</td><td>B</td></tr></table>"
-    score = table_teds(pred, gt)
-    assert 0.0 < score < 100.0
-
-
-def test_both_without_table_returns_none():
-    assert table_teds("plain text", "plain text") is None
-
-
-def test_has_any_table_detection():
-    assert has_any_table("<table><tr><td>A</td></tr></table>", "no table") is True
-    assert has_any_table("none", "none") is False
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_table_teds.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.table_teds）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/table_teds.py`：
-
-```python
-from __future__ import annotations
-
-from apted import APTED, Config
-
-from finix_restore.eval.tables import TableNode, extract_tables
-
-
-class _TableConfig(Config):
-    def rename(self, node_a: TableNode, node_b: TableNode) -> int:
-        if node_a.tag != node_b.tag:
-            return 1
-        if node_a.tag == "td":
-            same = (
-                node_a.text == node_b.text
-                and node_a.colspan == node_b.colspan
-                and node_a.rowspan == node_b.rowspan
-            )
-            return 0 if same else 1
-        return 0
-
-    def children(self, node: TableNode):
-        return node.children
-
-
-def _tree_size(node: TableNode) -> int:
-    return 1 + sum(_tree_size(child) for child in node.children)
-
-
-def _single_teds(pred_tree: TableNode, gt_tree: TableNode) -> float:
-    distance = APTED(pred_tree, gt_tree, _TableConfig()).compute_edit_distance()
-    denom = max(_tree_size(pred_tree), _tree_size(gt_tree))
-    if denom == 0:
-        return 100.0
-    return (1.0 - distance / denom) * 100.0
-
-
-def has_any_table(pred: str, gt: str) -> bool:
-    return bool(extract_tables(pred)) or bool(extract_tables(gt))
-
-
-def table_teds(pred: str, gt: str) -> float | None:
-    pred_tables = extract_tables(pred)
-    gt_tables = extract_tables(gt)
-    if not pred_tables and not gt_tables:
-        return None
-    count = max(len(pred_tables), len(gt_tables))
-    scores: list[float] = []
-    for idx in range(count):
-        if idx < len(pred_tables) and idx < len(gt_tables):
-            scores.append(_single_teds(pred_tables[idx], gt_tables[idx]))
-        else:
-            scores.append(0.0)
-    return sum(scores) / len(scores)
-```
-
-- [ ] **Step 4: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_table_teds.py -v`
-Expected: 4 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/table_teds.py tests/test_eval_table_teds.py
-git commit -m "feat(eval): add Table TEDS metric via apted tree edit distance"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_table_teds.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `table_teds.py`。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): add Table TEDS metric via apted tree edit distance`。
 
 ---
 
 ## Task 5: Read Order Edit 指标
 
-**Files:**
-- Create: `finix_restore/eval/reading_order.py`
-- Test: `tests/test_eval_reading_order.py`
+**Files:** Create `finix_restore/eval/reading_order.py`；Test `tests/test_eval_reading_order.py`
 
-说明：将文本切分为逻辑块（标题 / 表格 / 列表 / 段落，以空行分隔），每块生成稳定的身份签名 token，对 token 序列做 Levenshtein 归一化。
+**实现要点：**
+- `split_blocks`：`re.split(r"\n\s*\n", text)` 切块，丢空块；每块判 `kind`（`#`→h，`<table`/`|`→t，`^(\d+[.)]|[-*+])\s`→l，否则 p），签名 `"{kind}:{md5(norm)[:12]}"`。
+- `read_order_edit`：签名序列做序列级 Levenshtein，除以 `max(1, len(gt_blocks))`。
 
-- [ ] **Step 1: 写失败测试**
+**测试用例（验收）：**
+- `# Title\n\npara\n\n## Sub\n\npara2` → 4 块，签名前缀依次 `h/p/h/p`。
+- 相同文本 → `0.0`。
+- 块顺序对调 → `> 0.0`。
+- gt 为空 → `1.0`（分母取 1）。
 
-创建 `tests/test_eval_reading_order.py`：
-
-```python
-from finix_restore.eval.reading_order import split_blocks, read_order_edit
-
-
-def test_split_blocks_separates_headings_and_paragraphs():
-    text = "# Title\n\npara one\n\n## Sub\n\npara two"
-    blocks = split_blocks(text)
-    assert len(blocks) == 4
-    assert blocks[0].startswith("h:")
-    assert blocks[1].startswith("p:")
-    assert blocks[2].startswith("h:")
-
-
-def test_identical_order_is_zero():
-    text = "# A\n\nbody a\n\n# B\n\nbody b"
-    assert read_order_edit(text, text) == 0.0
-
-
-def test_swapped_blocks_increase_distance():
-    gt = "# A\n\nbody a\n\n# B\n\nbody b"
-    pred = "# B\n\nbody b\n\n# A\n\nbody a"
-    score = read_order_edit(pred, gt)
-    assert score > 0.0
-
-
-def test_empty_gt_uses_len_one_denominator():
-    assert read_order_edit("# A\n\nbody", "") == 1.0
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_reading_order.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.reading_order）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/reading_order.py`：
-
-```python
-from __future__ import annotations
-
-import hashlib
-import re
-
-
-def _block_signature(block: str) -> str:
-    stripped = block.strip()
-    if stripped.startswith("#"):
-        kind = "h"
-    elif stripped.startswith("<table") or stripped.startswith("|"):
-        kind = "t"
-    elif re.match(r"^(\d+[.)]|[-*+])\s", stripped):
-        kind = "l"
-    else:
-        kind = "p"
-    norm = re.sub(r"\s+", " ", stripped)
-    digest = hashlib.md5(norm.encode("utf-8")).hexdigest()[:12]
-    return f"{kind}:{digest}"
-
-
-def split_blocks(text: str) -> list[str]:
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    raw_blocks = [b for b in re.split(r"\n\s*\n", text) if b.strip()]
-    return [_block_signature(b) for b in raw_blocks]
-
-
-def _seq_levenshtein(a: list[str], b: list[str]) -> int:
-    if a == b:
-        return 0
-    if len(a) < len(b):
-        a, b = b, a
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, start=1):
-        current = [i]
-        for j, cb in enumerate(b, start=1):
-            insert = current[j - 1] + 1
-            delete = previous[j] + 1
-            replace = previous[j - 1] + (ca != cb)
-            current.append(min(insert, delete, replace))
-        previous = current
-    return previous[-1]
-
-
-def read_order_edit(pred: str, gt: str) -> float:
-    pred_blocks = split_blocks(pred)
-    gt_blocks = split_blocks(gt)
-    distance = _seq_levenshtein(pred_blocks, gt_blocks)
-    return distance / max(1, len(gt_blocks))
-```
-
-- [ ] **Step 4: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_reading_order.py -v`
-Expected: 4 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/reading_order.py tests/test_eval_reading_order.py
-git commit -m "feat(eval): add Read Order Edit block-level metric"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_reading_order.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `reading_order.py`。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): add Read Order Edit block-level metric`。
 
 ---
 
 ## Task 6: 输入读取与对齐（io）
 
-**Files:**
-- Create: `finix_restore/eval/io.py`
-- Test: `tests/test_eval_io.py`
+**Files:** Create `finix_restore/eval/io.py`；Test `tests/test_eval_io.py`
 
-说明：预测与 GT 支持官方 CSV（`file_name`, `ground_truth`）；GT 还支持训练集 `id_mapping.csv + mds/` 目录。输出对齐三元组与缺失项列表。
+**实现要点：**
+- `_read_submission_csv`：用 `utf-8-sig` 读取，校验列含 `file_name`/`ground_truth`，否则抛 `ValueError`；返回 `{file_name: ground_truth}`。
+- `_load_mapping`：把 `uuid`、`uuid.md`、`afts_id`、`afts_id.{md,png,jpg}` 全部映射到 `{uuid}.md`。
+- `load_pairs`：GT 为目录时按映射读取 `{uuid}.md`，目录模式 `missing_pred=[]`；GT 为 CSV 时按 file_name 取，可计算 `missing_pred`。
 
-- [ ] **Step 1: 写失败测试**
+**测试用例（验收）：**
+- 两份 CSV：对齐 2 条，`missing_gt/missing_pred` 为空，文本对应正确。
+- 缺项：预测多 1、GT 多 1 → 分别落入 `missing_gt`/`missing_pred`，pairs 只含交集。
+- 目录 + mapping：`afts-1.png` 经 `uuid-1` 命中 `uuid-1.md`，pairs 正确、无缺失。
 
-创建 `tests/test_eval_io.py`：
-
-```python
-from finix_restore.eval.io import load_pairs
-
-
-def _write(path, text):
-    path.write_text(text, encoding="utf-8")
-
-
-def test_load_pairs_from_two_csv(tmp_path):
-    pred = tmp_path / "pred.csv"
-    gt = tmp_path / "gt.csv"
-    _write(pred, "file_name,ground_truth\ndoc_001.png,hello\ndoc_002.png,world\n")
-    _write(gt, "file_name,ground_truth\ndoc_001.png,hi\ndoc_002.png,world\n")
-
-    pairs, missing_gt, missing_pred = load_pairs(pred, gt)
-
-    assert {p[0] for p in pairs} == {"doc_001.png", "doc_002.png"}
-    assert dict((p[0], (p[1], p[2])) for p in pairs)["doc_001.png"] == ("hello", "hi")
-    assert missing_gt == []
-    assert missing_pred == []
-
-
-def test_missing_gt_and_pred_are_reported(tmp_path):
-    pred = tmp_path / "pred.csv"
-    gt = tmp_path / "gt.csv"
-    _write(pred, "file_name,ground_truth\na.png,pa\nb.png,pb\n")
-    _write(gt, "file_name,ground_truth\na.png,ga\nc.png,gc\n")
-
-    pairs, missing_gt, missing_pred = load_pairs(pred, gt)
-
-    assert [p[0] for p in pairs] == ["a.png"]
-    assert missing_gt == ["b.png"]   # in pred but no gt
-    assert missing_pred == ["c.png"]  # in gt but no pred
-
-
-def test_gt_from_mapping_directory(tmp_path):
-    pred = tmp_path / "pred.csv"
-    _write(pred, "file_name,ground_truth\nafts-1.png,pred-text\n")
-    gt_dir = tmp_path / "mds"
-    gt_dir.mkdir()
-    _write(gt_dir / "uuid-1.md", "gt-text")
-    mapping = tmp_path / "id_mapping.csv"
-    _write(mapping, "uuid,afts_id\nuuid-1,afts-1\n")
-
-    pairs, missing_gt, missing_pred = load_pairs(pred, gt_dir, mapping_csv=mapping)
-
-    assert pairs == [("afts-1.png", "pred-text", "gt-text")]
-    assert missing_gt == []
-    assert missing_pred == []
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_io.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.io）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/io.py`：
-
-```python
-from __future__ import annotations
-
-import csv
-from pathlib import Path
-
-
-def _read_submission_csv(path: Path) -> dict[str, str]:
-    rows: dict[str, str] = {}
-    with Path(path).open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        if reader.fieldnames is None or "file_name" not in reader.fieldnames or "ground_truth" not in reader.fieldnames:
-            raise ValueError(f"CSV must have columns file_name,ground_truth: {path}")
-        for row in reader:
-            name = (row.get("file_name") or "").strip()
-            if name:
-                rows[name] = row.get("ground_truth") or ""
-    return rows
-
-
-def _load_mapping(mapping_csv: Path) -> dict[str, str]:
-    # Map any of {uuid, uuid.md, afts_id, afts_id.*} -> gt md filename (uuid.md)
-    mapping: dict[str, str] = {}
-    with Path(mapping_csv).open("r", encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            uuid = (row.get("uuid") or "").strip()
-            afts = (row.get("afts_id") or "").strip()
-            if not uuid:
-                continue
-            gt_name = f"{uuid}.md"
-            mapping[uuid] = gt_name
-            mapping[f"{uuid}.md"] = gt_name
-            if afts:
-                for key in (afts, f"{afts}.md", f"{afts}.png", f"{afts}.jpg"):
-                    mapping[key] = gt_name
-    return mapping
-
-
-def load_pairs(
-    pred_path,
-    gt_path,
-    mapping_csv=None,
-):
-    pred_path = Path(pred_path)
-    gt_path = Path(gt_path)
-    pred_rows = _read_submission_csv(pred_path)
-
-    if gt_path.is_dir():
-        mapping = _load_mapping(mapping_csv) if mapping_csv else {}
-
-        def gt_lookup(name: str) -> str | None:
-            gt_name = mapping.get(name) or mapping.get(Path(name).stem) or f"{Path(name).stem}.md"
-            gt_file = gt_path / gt_name
-            if gt_file.exists():
-                return gt_file.read_text(encoding="utf-8")
-            return None
-
-        gt_names = None
-    else:
-        gt_rows = _read_submission_csv(gt_path)
-
-        def gt_lookup(name: str) -> str | None:
-            return gt_rows.get(name)
-
-        gt_names = set(gt_rows.keys())
-
-    pairs: list[tuple[str, str, str]] = []
-    missing_gt: list[str] = []
-    for name in sorted(pred_rows):
-        gt_text = gt_lookup(name)
-        if gt_text is None:
-            missing_gt.append(name)
-            continue
-        pairs.append((name, pred_rows[name], gt_text))
-
-    missing_pred: list[str] = []
-    if gt_names is not None:
-        missing_pred = sorted(gt_names - set(pred_rows.keys()))
-
-    return pairs, missing_gt, missing_pred
-```
-
-- [ ] **Step 4: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_io.py -v`
-Expected: 3 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/io.py tests/test_eval_io.py
-git commit -m "feat(eval): load and align prediction/GT pairs from csv or mds dir"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_io.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `io.py`（仅 `_read_submission_csv`、`_load_mapping`、`load_pairs` 三个对象）。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): load and align prediction/GT pairs from csv or mds dir`。
 
 ---
 
 ## Task 7: Scorer 合成 Overall
 
-**Files:**
-- Create: `finix_restore/eval/scorer.py`
-- Modify: `finix_restore/eval/__init__.py`
-- Test: `tests/test_eval_scorer.py`
+**Files:** Create `finix_restore/eval/scorer.py`；Modify `finix_restore/eval/__init__.py`；Test `tests/test_eval_scorer.py`
 
-说明：逐文件计算三项指标并按官方公式合成 Overall（无表样本该文件 Table TEDS 视为 100）；数据集层面 `mean_table_teds` 仅统计含表样本。
+**实现要点：**
+- `score_pair` 调用三项指标；`has_table = (table_teds is not None)`；表格分量 = `teds if has_table else 100.0`；按公式算 `overall`。
+- `evaluate` 调 `load_pairs` 后逐条 `score_pair`，聚合均值；`mean_table_teds` 仅对 `has_table` 样本求均值并记 `table_sample_count`；`output` 写 JSON（`ensure_ascii=False, indent=2`）。
+- `__init__.py` 导出 `evaluate, score_pair`。
 
-- [ ] **Step 1: 写失败测试**
+**测试用例（验收）：**
+- 无表样本（pred==gt）：`text_edit==0`、`read_order_edit==0`、`table_teds is None`、`has_table False`、`overall==100.0`。
+- 含表样本（pred==gt）：`has_table True`、`table_teds==100.0`、`overall==100.0`。
+- `evaluate` 两条（1 含表 1 无表，均 pred==gt）：`file_count==2`、`mean_overall==100.0`、`mean_table_teds==100.0`、`table_sample_count==1`，且 JSON 落盘字段一致。
 
-创建 `tests/test_eval_scorer.py`：
-
-```python
-import json
-
-from finix_restore.eval.scorer import score_pair, evaluate
-
-
-def test_score_pair_identical_is_perfect():
-    text = "# A\n\nbody"
-    result = score_pair("doc.png", text, text)
-    assert result["text_edit"] == 0.0
-    assert result["read_order_edit"] == 0.0
-    assert result["table_teds"] is None
-    assert result["has_table"] is False
-    # no table -> table component treated as 100
-    assert result["overall"] == 100.0
-
-
-def test_score_pair_with_table_uses_teds_in_overall():
-    text = "<table><tr><td>A</td></tr></table>"
-    result = score_pair("doc.png", text, text)
-    assert result["has_table"] is True
-    assert result["table_teds"] == 100.0
-    assert result["overall"] == 100.0
-
-
-def test_evaluate_aggregates_and_writes_report(tmp_path):
-    pred = tmp_path / "pred.csv"
-    gt = tmp_path / "gt.csv"
-    pred.write_text(
-        "file_name,ground_truth\n"
-        "t.png,<table><tr><td>A</td></tr></table>\n"
-        "p.png,# Title\n",
-        encoding="utf-8",
-    )
-    gt.write_text(
-        "file_name,ground_truth\n"
-        "t.png,<table><tr><td>A</td></tr></table>\n"
-        "p.png,# Title\n",
-        encoding="utf-8",
-    )
-    out = tmp_path / "metrics.json"
-
-    report = evaluate(pred, gt, output=out)
-
-    assert report["file_count"] == 2
-    assert report["mean_overall"] == 100.0
-    # only the table sample participates in table mean
-    assert report["mean_table_teds"] == 100.0
-    assert report["table_sample_count"] == 1
-    saved = json.loads(out.read_text(encoding="utf-8"))
-    assert saved["mean_overall"] == 100.0
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_scorer.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.scorer）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/scorer.py`：
-
-```python
-from __future__ import annotations
-
-import json
-from pathlib import Path
-
-from finix_restore.eval.io import load_pairs
-from finix_restore.eval.reading_order import read_order_edit
-from finix_restore.eval.table_teds import table_teds
-from finix_restore.eval.text_metric import text_edit
-
-
-def score_pair(file_name: str, pred: str, gt: str) -> dict:
-    te = text_edit(pred, gt)
-    roe = read_order_edit(pred, gt)
-    teds = table_teds(pred, gt)
-    has_table = teds is not None
-    table_component = teds if has_table else 100.0
-    overall = ((1.0 - te) * 100.0 + table_component + (1.0 - roe) * 100.0) / 3.0
-    return {
-        "file_name": file_name,
-        "text_edit": te,
-        "table_teds": teds,
-        "read_order_edit": roe,
-        "has_table": has_table,
-        "overall": overall,
-    }
-
-
-def _mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
-
-
-def evaluate(pred_path, gt_path, mapping_csv=None, output=None) -> dict:
-    pairs, missing_gt, missing_pred = load_pairs(pred_path, gt_path, mapping_csv)
-    files = [score_pair(name, pred, gt) for name, pred, gt in pairs]
-
-    table_scores = [f["table_teds"] for f in files if f["has_table"]]
-    report = {
-        "file_count": len(files),
-        "missing_gt": missing_gt,
-        "missing_pred": missing_pred,
-        "mean_text_edit": _mean([f["text_edit"] for f in files]),
-        "mean_read_order_edit": _mean([f["read_order_edit"] for f in files]),
-        "mean_table_teds": _mean(table_scores),
-        "table_sample_count": len(table_scores),
-        "mean_overall": _mean([f["overall"] for f in files]),
-        "files": files,
-    }
-    if output is not None:
-        output = Path(output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return report
-```
-
-- [ ] **Step 4: 导出公共 API**
-
-将 `finix_restore/eval/__init__.py` 替换为：
-
-```python
-from __future__ import annotations
-
-from finix_restore.eval.scorer import evaluate, score_pair
-
-__all__ = ["evaluate", "score_pair"]
-```
-
-- [ ] **Step 5: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_scorer.py -v`
-Expected: 3 passed。
-
-- [ ] **Step 6: 提交**
-
-```bash
-git add finix_restore/eval/scorer.py finix_restore/eval/__init__.py tests/test_eval_scorer.py
-git commit -m "feat(eval): aggregate three metrics into official Overall score"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_scorer.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `scorer.py` 并更新 `__init__.py` 导出。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): aggregate three metrics into official Overall score`。
 
 ---
 
 ## Task 8: CLI 入口
 
-**Files:**
-- Create: `finix_restore/eval/cli.py`
-- Test: `tests/test_eval_cli.py`
+**Files:** Create `finix_restore/eval/cli.py`；Test `tests/test_eval_cli.py`
 
-- [ ] **Step 1: 写失败测试**
+**实现要点：** `argparse` 解析参数（见契约），调 `evaluate`，打印 `mean_text_edit`/`mean_table_teds`/`mean_read_order_edit`/`Overall` 与缺失计数，返回 0。`__main__` 守卫调用 `main`。
 
-创建 `tests/test_eval_cli.py`：
+**测试用例（验收）：** 用临时 CSV（pred==gt 1 条）调 `main([...])` 返回 0；JSON `file_count==1`；stdout 含 `"Overall"`。
 
-```python
-import json
-
-from finix_restore.eval.cli import main
-
-
-def test_cli_runs_and_writes_report(tmp_path, capsys):
-    pred = tmp_path / "pred.csv"
-    gt = tmp_path / "gt.csv"
-    pred.write_text("file_name,ground_truth\nd.png,# Title\n", encoding="utf-8")
-    gt.write_text("file_name,ground_truth\nd.png,# Title\n", encoding="utf-8")
-    out = tmp_path / "metrics.json"
-
-    code = main([
-        "--pred", str(pred),
-        "--gt", str(gt),
-        "--output", str(out),
-    ])
-
-    assert code == 0
-    saved = json.loads(out.read_text(encoding="utf-8"))
-    assert saved["file_count"] == 1
-    captured = capsys.readouterr()
-    assert "Overall" in captured.out
-```
-
-- [ ] **Step 2: 运行测试确认失败**
-
-Run: `pytest tests/test_eval_cli.py -v`
-Expected: FAIL（ModuleNotFoundError: finix_restore.eval.cli）。
-
-- [ ] **Step 3: 实现最小代码**
-
-创建 `finix_restore/eval/cli.py`：
-
-```python
-from __future__ import annotations
-
-import argparse
-from pathlib import Path
-
-from finix_restore.eval.scorer import evaluate
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Offline scorer reproducing AFAC Task2 Overall (Text Edit / Table TEDS / Read Order Edit)"
-    )
-    parser.add_argument("--pred", required=True, help="prediction CSV (file_name,ground_truth)")
-    parser.add_argument("--gt", required=True, help="GT CSV or mds directory")
-    parser.add_argument("--mapping_csv", help="id_mapping.csv when --gt is a directory")
-    parser.add_argument("--output", required=True, help="metrics JSON output path")
-    args = parser.parse_args(argv)
-
-    report = evaluate(
-        Path(args.pred),
-        Path(args.gt),
-        Path(args.mapping_csv) if args.mapping_csv else None,
-        Path(args.output),
-    )
-
-    print(f"files: {report['file_count']}  table_samples: {report['table_sample_count']}")
-    print(f"mean Text Edit:       {report['mean_text_edit']:.4f}")
-    print(f"mean Table TEDS:      {report['mean_table_teds']:.2f}")
-    print(f"mean Read Order Edit: {report['mean_read_order_edit']:.4f}")
-    print(f"Overall:              {report['mean_overall']:.2f}")
-    if report["missing_gt"]:
-        print(f"missing_gt: {len(report['missing_gt'])}")
-    if report["missing_pred"]:
-        print(f"missing_pred: {len(report['missing_pred'])}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-- [ ] **Step 4: 运行测试确认通过**
-
-Run: `pytest tests/test_eval_cli.py -v`
-Expected: 1 passed。
-
-- [ ] **Step 5: 提交**
-
-```bash
-git add finix_restore/eval/cli.py tests/test_eval_cli.py
-git commit -m "feat(eval): add scorer CLI entry point"
-```
+**步骤：**
+- [ ] **Step 1:** 写失败测试。
+- [ ] **Step 2:** Run `pytest tests/test_eval_cli.py -v`，Expected: FAIL。
+- [ ] **Step 3:** 实现 `cli.py`。
+- [ ] **Step 4:** Run 同上，Expected: passed。
+- [ ] **Step 5:** 提交 `feat(eval): add scorer CLI entry point`。
 
 ---
 
-## Task 9: 全量验证
+## Task 9: 全量验证与验收
 
 **Files:** 无新增。
 
-- [ ] **Step 1: 运行全部测试**
+**验收标准（必须全部满足）：**
+- `pytest -q` 全绿，含新增 7 个 eval 测试文件，且 `tests/test_local_eval.py` 等既有测试不回归。
+- `ruff check finix_restore/eval tests` 无错误。
+- 自洽冒烟：构造最小预测 CSV（pred 与 gt 用同一份），CLI 输出 `Overall == 100.00`、JSON 字段完整。
+- 差异冒烟（非自洽）：取一份与 GT 有已知差异的预测，确认 `mean_overall < 100`、含表样本 `table_teds` 落在 `(0,100)`、`missing_*` 统计正确 —— 用于验证指标对差异敏感、非恒等返回满分。
 
-Run: `pytest -q`
-Expected: 全绿，包含新增 7 个 eval 测试文件，且原 `tests/test_local_eval.py` 等仍通过。
-
-- [ ] **Step 2: 运行 lint**
-
-Run: `ruff check finix_restore/eval tests`
-Expected: 无错误（若有则修复后重跑）。
-
-- [ ] **Step 3: 在训练集上真实跑通 CLI（冒烟）**
-
-构造一份最小预测 CSV：取 `data/AFAC 训练数据集/finixdocbench_huge_table_100/mds/` 中任意 2 个 GT 作为「预测」，文件名用对应 afts_id（可直接用 uuid 作 file_name 并把 GT 也用同一 CSV）以验证流程；或直接用同一份 CSV 作为 pred 和 gt，确认 Overall≈100。
-
-示例（自洽冒烟，确认管线打通）：
-
-```bash
-python -m finix_restore.eval.cli \
-  --pred /tmp/smoke_pred.csv \
-  --gt /tmp/smoke_pred.csv \
-  --output outputs/eval/smoke_metrics.json
-```
-
-Expected: 打印 Overall 100.00；`outputs/eval/smoke_metrics.json` 字段完整。
-
-- [ ] **Step 4: 最终提交（如有 lint 修复或冒烟产物清理）**
-
-```bash
-git add -A
-git commit -m "test(eval): full suite green and CLI smoke verified"
-```
-
-注意：`outputs/` 仅放运行产物、不入库；如冒烟产物落在 `outputs/`，确认其在 `.gitignore` 中或不要 `git add`。
+**步骤：**
+- [ ] **Step 1:** Run `pytest -q`，Expected: 全绿。
+- [ ] **Step 2:** Run `ruff check finix_restore/eval tests`，Expected: 无错误（有则修复重跑）。
+- [ ] **Step 3:** 自洽冒烟：
+  ```bash
+  python -m finix_restore.eval.cli --pred /tmp/smoke_pred.csv --gt /tmp/smoke_pred.csv --output outputs/eval/smoke_metrics.json
+  ```
+  Expected: 打印 `Overall 100.00`；JSON 字段完整。
+- [ ] **Step 4:** 差异冒烟：改一份预测使其与 GT 不同，确认上述差异验收标准成立。
+- [ ] **Step 5:** 最终提交（lint 修复/产物清理）。注意：`outputs/` 仅放产物、不入库，勿 `git add`。
+- [ ] **Step 6:** 发起 PR，描述引用本计划与设计文档，列出新增模块与验收结果。
