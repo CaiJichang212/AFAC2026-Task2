@@ -59,3 +59,28 @@ def test_prepare_samples_creates_manifest_and_links(tmp_path: Path):
     assert len(rows) == 4
     assert len(list((out_root / "long" / "images").iterdir())) == 2
     assert len(list((out_root / "table" / "images").iterdir())) == 2
+
+
+def test_prepare_samples_with_relative_sources_creates_usable_links(tmp_path: Path, monkeypatch):
+    profile = tmp_path / "profile.csv"
+    _write_profile(profile)
+    long_dir = tmp_path / "long_src"
+    table_dir = tmp_path / "table_src"
+    for subset_dir, subset in ((long_dir, "long"), (table_dir, "table")):
+        subset_dir.mkdir()
+        for index in range(1, 6):
+            (subset_dir / f"{subset}_{index}.png").write_bytes(b"fake")
+
+    monkeypatch.chdir(tmp_path)
+    prepare_samples(
+        Path("profile.csv"),
+        {"long": Path("long_src"), "table": Path("table_src")},
+        Path("samples"),
+        Path("sample_manifest.csv"),
+        per_subset=1,
+    )
+
+    long_sample = next((tmp_path / "samples" / "long" / "images").iterdir())
+    table_sample = next((tmp_path / "samples" / "table" / "images").iterdir())
+    assert long_sample.is_file()
+    assert table_sample.is_file()

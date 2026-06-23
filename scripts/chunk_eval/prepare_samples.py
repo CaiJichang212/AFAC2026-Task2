@@ -37,6 +37,7 @@ def select_samples(profile_csv: Path, per_subset: int) -> list[dict[str, str]]:
 
 
 def _link_or_copy(src: Path, dst: Path) -> None:
+    src = src.resolve()
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         dst.unlink()
