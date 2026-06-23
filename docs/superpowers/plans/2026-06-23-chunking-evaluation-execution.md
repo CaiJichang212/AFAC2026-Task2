@@ -257,7 +257,7 @@ def test_build_profiles_writes_expected_columns(tmp_path: Path):
     long_dir = tmp_path / "long"
     table_dir = tmp_path / "table"
     _make_image(long_dir / "long_a.png", (100, 1200))
-    _make_image(table_dir / "table_a.png", (4000, 4000))
+    _make_image(table_dir / "table_a.png", (3600, 4800))
 
     rows = build_profiles({"long": long_dir, "table": table_dir})
 
@@ -284,11 +284,11 @@ def test_write_profile_outputs_creates_csvs(tmp_path: Path):
         {
             "subset": "table",
             "file_name": "b.png",
-            "width": 4000,
-            "height": 4000,
-            "pixels": 16000000,
-            "aspect": "1.0000",
-            "doc_type": "normal_page",
+            "width": 3600,
+            "height": 4800,
+            "pixels": 17280000,
+            "aspect": "1.3333",
+            "doc_type": "table_page",
             "risk_level": "medium",
             "pixel_bucket": "p080_p100",
         },
