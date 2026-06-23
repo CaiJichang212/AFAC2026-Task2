@@ -77,9 +77,11 @@ def test_parse_chunk_posts_multipart_and_redacts_api_key(tmp_path):
     assert meta["response_sha1"] == _response_sha1("# parsed")
     log_text = (paths.logs_dir / "run.jsonl").read_text(encoding="utf-8")
     assert "secret-key" not in log_text
+    assert "finixA1001" not in log_text
     assert "api_call" in log_text
     log_row = json.loads(log_text.strip())
     assert log_row["run_id"] == "run-123"
+    assert log_row["user_id"] == "***"
     assert log_row["response_sha1"] == _response_sha1("# parsed")
     assert log_row["response_chars"] == len("# parsed")
     assert log_row["content_validated"] is True

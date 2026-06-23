@@ -300,7 +300,7 @@ class FinixApiClient:
                 "run_id": self.run_id,
                 "file_name": chunk.file_name,
                 "chunk_id": chunk.chunk_id,
-                "user_id": user_id,
+                "user_id": "***",
                 "status": status,
                 "elapsed_ms": elapsed_ms,
                 "retry_index": retry_index,

@@ -48,6 +48,7 @@ class RunConfig:
         payload["output_csv"] = str(self.output_csv)
         payload["paths"] = {k: str(v) for k, v in asdict(self.paths).items()}
         payload["api_key"] = "***"
+        payload["user_ids"] = ["***" for _ in self.user_ids]
         payload["chunk"] = self.chunk.to_dict()
         return payload
 

@@ -166,6 +166,9 @@ def test_config_accepts_legacy_env_key_names(tmp_path, monkeypatch):
     assert config.api_key == "legacy-secret"
     assert config.user_ids == ["u1", "u2"]
     assert config.snapshot()["api_key"] == "***"
+    assert config.snapshot()["user_ids"] == ["***", "***"]
+    assert "u1" not in str(config.snapshot())
+    assert "u2" not in str(config.snapshot())
 
 
 def test_config_keeps_repeated_input_dirs_and_caps_concurrency(tmp_path, monkeypatch):
@@ -202,6 +205,7 @@ def test_config_keeps_repeated_input_dirs_and_caps_concurrency(tmp_path, monkeyp
     assert config.api["concurrency"] == 2
     assert config.api_url == "https://example.test/api"
     assert config.snapshot()["api_key"] == "***"
+    assert config.snapshot()["user_ids"] == ["***", "***"]
     assert config.paths.logs_dir.exists()
 
 
