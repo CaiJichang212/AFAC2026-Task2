@@ -249,7 +249,12 @@ class Pipeline:
         path = self._merged_path(file_name)
         if not path.exists():
             return None
-        return path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8")
+        # 空的 merged 往往来自上一轮 API 全失败/崩溃, 不应作为有效缓存复用,
+        # 否则 resume 会永久跳过该图, 无法自愈。
+        if not text.strip():
+            return None
+        return text
 
     def _merged_path(self, file_name: str) -> Path:
         return self.config.paths.merged_dir / f"{Path(file_name).stem}.md"

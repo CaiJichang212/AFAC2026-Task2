@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import re
 import threading
 import time
@@ -115,7 +116,7 @@ class FinixApiClient:
                 self._log_api_call(chunk, user_id, "retryable_error", elapsed_ms, retry_index, None)
                 if retry_index >= self.max_retries:
                     break
-                self.sleep(2**retry_index)
+                self.sleep(self._backoff_seconds(retry_index))
         raise FinixApiError(f"FinixDoc-VL request failed after retries: {last_error}")
 
     def parse_chunks(self, chunks: list[Chunk], force_api: bool = False) -> tuple[list[ChunkText], int]:
@@ -204,6 +205,12 @@ class FinixApiClient:
         if match:
             return match.group(1).strip()
         return stripped
+
+    def _backoff_seconds(self, retry_index: int) -> float:
+        # API 存在连接级限流, 连续失败需要更长退避 + 抖动, 避免再次触发 RemoteDisconnected/SSLError。
+        base = min(5.0 * (2 ** retry_index), 40.0)
+        jitter = random.uniform(0.0, base * 0.5)
+        return base + jitter
 
     def _next_user_id(self) -> str:
         with self._user_lock:

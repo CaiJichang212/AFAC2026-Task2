@@ -378,7 +378,9 @@ def test_retries_5xx_and_fails_fast_on_auth_error(tmp_path):
 
     assert result.markdown == "ok"
     assert len(session.calls) == 2
-    assert sleeps == [1]
+    # 退避策略: retry_index=0 -> base=5s + 抖动(0~2.5s)
+    assert len(sleeps) == 1
+    assert 5.0 <= sleeps[0] < 7.5
 
     auth_session = FakeSession([FakeResponse(403, "forbidden"), FakeResponse(200, "unused")])
     auth_client = FinixApiClient(

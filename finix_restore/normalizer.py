@@ -17,6 +17,10 @@ _API_ERROR_PATTERNS = (
     "request failed",
     "server error",
 )
+# VLM 经常把整段输出用 ```markdown / ```html / ``` 代码围栏包裹。围栏会污染
+# 文本编辑距离，并在多切片拼接后嵌入表格行中间破坏 HTML/TEDS 结构，必须剥离。
+# 只剥“独占一行”的围栏标记，避免误删正文里出现的连续反引号代码示例。
+_CODE_FENCE_LINE = re.compile(r"^\s*`{3,}\s*[a-zA-Z0-9_-]*\s*$")
 
 
 class MarkdownNormalizer:
@@ -26,6 +30,8 @@ class MarkdownNormalizer:
         for line in text.split("\n"):
             stripped_line = line.rstrip()
             if self._is_obvious_api_error(stripped_line):
+                continue
+            if _CODE_FENCE_LINE.match(stripped_line):
                 continue
             stripped_line = self._fix_doubled_hash_heading(stripped_line)
             stripped_line = _HEADING_WITHOUT_SPACE.sub(r"\1 ", stripped_line)

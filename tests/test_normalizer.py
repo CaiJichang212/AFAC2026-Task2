@@ -73,3 +73,23 @@ def test_normalizer_still_adds_space_after_hash_without_space():
     normalized = MarkdownNormalizer().normalize(raw)
 
     assert normalized == "## 1.1 保险责任\n### 2.1.1 赔付\n"
+
+
+def test_normalizer_strips_code_fence_lines():
+    raw = "```markdown\n# 标题\n正文\n```"
+
+    normalized = MarkdownNormalizer().normalize(raw)
+
+    assert normalized == "# 标题\n正文\n"
+    assert "```" not in normalized
+
+
+def test_normalizer_strips_fence_embedded_between_table_chunks():
+    raw = "<table>\n<tr><td>a</td></tr>\n```\n```markdown\n<tr><td>b</td></tr>\n</table>"
+
+    normalized = MarkdownNormalizer().normalize(raw)
+
+    assert "```" not in normalized
+    assert "<tr><td>a</td></tr>" in normalized
+    assert "<tr><td>b</td></tr>" in normalized
+
