@@ -45,6 +45,12 @@ class Chunk:
     is_last_col: bool = False
     cut_source: str = "unknown"
     risk_flags: tuple[str, ...] = ()
+    table_group_id: str | None = None
+    row_band: int | None = None
+    col_band: int | None = None
+    base_bbox: tuple[int, int, int, int] | None = None
+    overlap_bbox: tuple[int, int, int, int] | None = None
+    requires_row_assembly: bool = False
 
 
 @dataclass(frozen=True)

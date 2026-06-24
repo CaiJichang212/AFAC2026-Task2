@@ -259,11 +259,17 @@ class TableGridChunker:
             entries = [
                 {
                     "bbox": content_box,
+                    "base_bbox": content_box,
+                    "overlap_bbox": content_box,
                     "row": 0,
                     "col": 0,
                     "rows": 1,
                     "cols": 1,
                     "cut_source": "full_page",
+                    "table_group_id": Path(profile.file_name).stem,
+                    "row_band": 0,
+                    "col_band": 0,
+                    "requires_row_assembly": False,
                     "horizontal_overlap": 0,
                     "vertical_overlap": 0,
                 }
@@ -356,11 +362,17 @@ class TableGridChunker:
                 entries.append(
                     {
                         "bbox": (x0, y0, x1, y1),
+                        "base_bbox": (base_x0, base_y0, base_x1, base_y1),
+                        "overlap_bbox": (x0, y0, x1, y1),
                         "row": row,
                         "col": col,
                         "rows": rows,
                         "cols": cols,
                         "cut_source": cut_source,
+                        "table_group_id": Path(profile.file_name).stem,
+                        "row_band": row,
+                        "col_band": col,
+                        "requires_row_assembly": rows > 1 or cols > 1,
                         "horizontal_overlap": overlap_x,
                         "vertical_overlap": overlap_y,
                     }
@@ -616,6 +628,12 @@ class TableGridChunker:
                     is_last_col=col == cols - 1,
                     cut_source=cut_source,
                     risk_flags=tuple(unique_flags),
+                    table_group_id=entry.get("table_group_id"),
+                    row_band=entry.get("row_band"),
+                    col_band=entry.get("col_band"),
+                    base_bbox=entry.get("base_bbox"),
+                    overlap_bbox=entry.get("overlap_bbox", bbox),
+                    requires_row_assembly=entry.get("requires_row_assembly", False),
                 )
             )
 

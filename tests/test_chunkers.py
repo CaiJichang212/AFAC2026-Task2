@@ -72,6 +72,11 @@ def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
     chunks = chunker.chunk(profile, hints)
 
     assert len(chunks) > 1
+    assert chunks[0].row_band == 0
+    assert chunks[0].col_band == 0
+    assert chunks[0].base_bbox is not None
+    assert chunks[0].overlap_bbox == chunks[0].bbox
+    assert chunks[0].requires_row_assembly is True
     for chunk in chunks:
         x0, y0, x1, y1 = chunk.bbox
         assert 0 <= x0 < x1 <= 6000
@@ -86,6 +91,11 @@ def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
     assert last_chunk["is_last_col"] is True
     assert last_chunk["cut_source"] in {"full_page", "grid"}
     assert isinstance(last_chunk["risk_flags"], list)
+    assert manifest["chunks"][0]["row_band"] == 0
+    assert manifest["chunks"][0]["col_band"] == 0
+    assert manifest["chunks"][0]["base_bbox"] is not None
+    assert manifest["chunks"][0]["overlap_bbox"] == manifest["chunks"][0]["bbox"]
+    assert "requires_row_assembly" in manifest["chunks"][0]
 
 
 def test_default_table_config_splits_15m_pixel_pages_for_api_stability():
@@ -395,4 +405,3 @@ def test_small_tail_flag_is_set_for_tiny_chunks(tmp_path):
 
     assert len(chunks) == 1
     assert "small_tail" in chunks[0].risk_flags
-
