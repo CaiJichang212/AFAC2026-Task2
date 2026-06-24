@@ -1,6 +1,6 @@
 # Table Structure Reading Order Optimization Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 为 AFAC Task2 增强表格页结构还原、长条文档阅读顺序恢复和提交前风险门禁，优先解决当前 A 榜 60.7775 分的主要瓶颈。
 
