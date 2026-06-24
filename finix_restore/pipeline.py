@@ -22,6 +22,7 @@ from finix_restore.quality_gate import IMAGE_SUFFIXES, QualityGate
 from finix_restore.reading_order import ReadingOrderResolver
 from finix_restore.retry_planner import RetryPlanner
 from finix_restore.submission import SubmissionWriter
+from finix_restore.table_assembler import TableRowAssembler
 from finix_restore.table_merger import TableMerger
 
 
@@ -43,6 +44,7 @@ class Pipeline:
             similarity_threshold=float(config.merge.get("dedup_similarity_threshold", 0.88)),
         )
         self.table_merger = TableMerger()
+        self.table_assembler = TableRowAssembler()
         self.quality_gate = QualityGate(
             config.paths,
             max_duplication_ratio=float(config.quality.get("max_duplication_ratio", 0.18)),
@@ -137,7 +139,7 @@ class Pipeline:
         force_api = self.config.force_api
         concurrency_override: int | None = None
         while True:
-            markdown, failed_chunks = self._process_image_once(
+            markdown, failed_chunks, extra_metrics = self._process_image_once(
                 chunks,
                 profile,
                 force_api=force_api,
@@ -149,6 +151,7 @@ class Pipeline:
                 profile.doc_type,
                 chunk_count=len(chunks),
                 failed_chunks=failed_chunks,
+                extra_metrics=extra_metrics,
             )
             plan = self.retry_planner.plan(quality, rerun_count=rerun_count)
             if quality.passed or not plan["rerun"]:
@@ -169,7 +172,7 @@ class Pipeline:
         profile: ImageProfile,
         force_api: bool = False,
         concurrency_override: int | None = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str, int, dict[str, float | int | str]]:
         chunk_texts, failed_chunks = self._parse_chunks(
             chunks,
             force_api=force_api,
@@ -178,11 +181,21 @@ class Pipeline:
         normalized = self.normalizer.batch(chunk_texts)
         self._write_normalized(profile.file_name, normalized)
         ordered = self.order_resolver.resolve(normalized, doc_type=profile.doc_type)
-        merged = self.dedup.merge(ordered)
-        repaired = self.table_merger.repair(merged.markdown)
+        extra_metrics: dict[str, float | int | str] = {}
+        if profile.doc_type == "table_page":
+            assembled = self.table_assembler.assemble(ordered)
+            repaired = self.table_merger.repair(assembled.markdown)
+            extra_metrics["table_assembled_tables"] = assembled.assembled_tables
+            extra_metrics["table_assembly_warning_count"] = len(assembled.warnings)
+            if assembled.warnings:
+                extra_metrics["table_assembly_warnings"] = ",".join(assembled.warnings)
+        else:
+            merged = self.dedup.merge(ordered)
+            repaired = self.table_merger.repair(merged.markdown)
+        extra_metrics["table_repaired_tags"] = repaired.repaired_tags
         markdown = repaired.markdown
         self._write_merged(profile.file_name, markdown)
-        return markdown, failed_chunks
+        return markdown, failed_chunks, extra_metrics
 
     def _parse_chunks(
         self,
