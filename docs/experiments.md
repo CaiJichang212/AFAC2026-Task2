@@ -23,6 +23,56 @@ python -m finix_restore.local_eval \
   --output outputs/train_long/metrics/long_eval.json
 ```
 
+## 结构优化 smoke 命令
+
+### table smoke
+
+```bash
+python -m finix_restore.cli \
+  --input_dir "data/AFAC 训练数据集/finixdocbench_huge_table_100/images" \
+  --output_csv outputs/chunk_eval/table_structure_smoke/submission.csv \
+  --work_dir outputs/chunk_eval/table_structure_smoke/run \
+  --config scripts/chunk_eval/configs/balanced_6m.yaml \
+  --limit 5 \
+  --image_concurrency 1
+```
+
+```bash
+python -m finix_restore.eval.cli \
+  --pred outputs/chunk_eval/table_structure_smoke/submission.csv \
+  --gt "data/AFAC 训练数据集/finixdocbench_huge_table_100/mds" \
+  --output outputs/chunk_eval/table_structure_smoke/metrics.json
+```
+
+### long smoke
+
+```bash
+python -m finix_restore.cli \
+  --input_dir "data/AFAC 训练数据集/finixdocbench_huge_long_100/images" \
+  --output_csv outputs/chunk_eval/long_order_smoke/submission.csv \
+  --work_dir outputs/chunk_eval/long_order_smoke/run \
+  --config scripts/chunk_eval/configs/balanced_6m.yaml \
+  --limit 5 \
+  --image_concurrency 1
+```
+
+```bash
+python -m finix_restore.eval.cli \
+  --pred outputs/chunk_eval/long_order_smoke/submission.csv \
+  --gt "data/AFAC 训练数据集/finixdocbench_huge_long_100/mds" \
+  --output outputs/chunk_eval/long_order_smoke/metrics.json
+```
+
+### 风险门禁校验
+
+```bash
+python scripts/chunk_eval/validate_submission.py \
+  --csv outputs/chunk_eval/table_structure_smoke/submission.csv \
+  --expected-dir "data/AFAC 训练数据集/finixdocbench_huge_table_100/images" \
+  --qc-summary outputs/chunk_eval/table_structure_smoke/run/qc/summary.json \
+  --fail-on-risk html_broken
+```
+
 ## 记录要求
 
 - `输入目录` 写完整目录，多个目录用逗号分隔。
