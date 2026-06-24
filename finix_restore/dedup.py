@@ -3,6 +3,7 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from typing import Sequence
 
+from finix_restore.block_segments import BlockSegmenter
 from finix_restore.models import Chunk, ChunkText, MergeResult
 
 
@@ -19,6 +20,7 @@ class DedupMerger:
         self.window_chars_long = window_chars_long
         self.window_chars_table = window_chars_table
         self.similarity_threshold = similarity_threshold
+        self.segmenter = BlockSegmenter()
 
     def merge(self, ordered_chunks: Sequence[ChunkText]) -> MergeResult:
         if not ordered_chunks:
@@ -47,9 +49,19 @@ class DedupMerger:
         return MergeResult(markdown=merged.strip() + ("\n" if merged.strip() else ""), removed_ranges=removed_ranges, warnings=warnings)
 
     def _can_dedup(self, previous: ChunkText, current: ChunkText) -> bool:
-        if previous.block_type in _PROTECTED_BLOCKS or current.block_type in _PROTECTED_BLOCKS:
+        previous_block_type = self._effective_block_type(previous)
+        current_block_type = self._effective_block_type(current)
+        if previous_block_type in _PROTECTED_BLOCKS or current_block_type in _PROTECTED_BLOCKS:
             return False
         return self._chunks_overlap(previous.chunk, current.chunk)
+
+    def _effective_block_type(self, chunk: ChunkText) -> str:
+        if chunk.block_type in _PROTECTED_BLOCKS:
+            return chunk.block_type
+        for segment in self.segmenter.segment(chunk.markdown):
+            if segment.block_type in _PROTECTED_BLOCKS:
+                return segment.block_type
+        return chunk.block_type
 
     def _chunks_overlap(self, previous: Chunk, current: Chunk) -> bool:
         has_declared_overlap = any(int(value) > 0 for value in current.overlap.values()) or any(

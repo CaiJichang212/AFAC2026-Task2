@@ -3,10 +3,14 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Sequence
 
+from finix_restore.block_segments import BlockSegmenter
 from finix_restore.models import ChunkText, DocType
 
 
 class ReadingOrderResolver:
+    def __init__(self) -> None:
+        self.segmenter = BlockSegmenter()
+
     def resolve(self, chunks: Sequence[ChunkText], doc_type: DocType = "unknown") -> list[ChunkText]:
         candidates = [chunk for chunk in chunks if not self._is_reference_chunk(chunk, doc_type)]
         if doc_type == "table_page":
@@ -22,9 +26,18 @@ class ReadingOrderResolver:
         return doc_type == "table_page" and (chunk.chunk.row < 0 or chunk.chunk.col < 0)
 
     def _mark_structure(self, chunk: ChunkText) -> ChunkText:
+        protected_type = self._protected_block_type(chunk.markdown)
+        if protected_type is not None:
+            return replace(chunk, block_type=protected_type)
         if self._looks_like_toc(chunk.markdown):
             return replace(chunk, block_type="toc")
         return chunk
+
+    def _protected_block_type(self, markdown: str) -> str | None:
+        for segment in self.segmenter.segment(markdown):
+            if segment.block_type in {"toc", "table", "header_footer"}:
+                return segment.block_type
+        return None
 
     def _looks_like_toc(self, markdown: str) -> bool:
         lines = [line.strip() for line in markdown.splitlines() if line.strip()]

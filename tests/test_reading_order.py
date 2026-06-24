@@ -59,3 +59,17 @@ def test_toc_block_is_marked_and_not_treated_as_body():
 
     assert ordered[0].block_type == "toc"
     assert ordered[1].block_type == "body"
+
+
+def test_toc_like_numbered_chunk_is_marked_without_literal_directory_title():
+    toc = _chunk_text(
+        "doc.png",
+        "1 总则 ........ 1\n2 保险责任 ........ 2\n3 责任免除 ........ 3",
+        (0, 0, 100, 100),
+    )
+    body = _chunk_text("doc.png", "# 1 总则\n正文", (0, 100, 100, 200))
+
+    ordered = ReadingOrderResolver().resolve([body, toc], doc_type="long_strip")
+
+    assert ordered[0].block_type == "toc"
+    assert ordered[1].block_type == "body"
