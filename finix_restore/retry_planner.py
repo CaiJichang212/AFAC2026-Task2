@@ -24,10 +24,16 @@ class RetryPlanner:
         if "service_busy_html" in risks or "full_html_page" in risks:
             actions["force_api"] = True
             actions["concurrency"] = 1
+        if "html_broken" in risks:
+            actions["force_api"] = True
+            actions["concurrency"] = 1
         if "api_failure_ratio_high" in risks:
             actions["concurrency"] = 1
         if "too_short" in risks:
             actions["overlap_scale"] = 1.5
+            if report.metrics.get("doc_type") == "table_page":
+                actions["table_grid_scale"] = 1.15
+                actions["concurrency"] = max(1, int(actions["concurrency"]))
 
         actions["rerun"] = True
         return actions

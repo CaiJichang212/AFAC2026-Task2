@@ -99,7 +99,8 @@ class QualityGate:
             risks.append("high_duplication")
 
         risks.extend(self.detect_forbidden_html(text))
-        if self._html_is_broken(text):
+        table_html = self.table_html_status(text)
+        if table_html["html_broken"] > 0:
             risks.append("html_broken")
 
         failure_ratio = failed_chunks / chunk_count if chunk_count else 0.0
@@ -166,6 +167,14 @@ class QualityGate:
         )
         return summary
 
+    def table_html_status(self, markdown: str) -> dict[str, int]:
+        if "<table" not in markdown.lower():
+            return {"html_broken": 0, "table_count": 0}
+        return {
+            "html_broken": self._broken_table_tag_count(markdown),
+            "table_count": markdown.lower().count("<table"),
+        }
+
     def detect_forbidden_html(self, markdown: str) -> list[str]:
         lowered = markdown.strip().lower()
         if not lowered:
@@ -217,9 +226,15 @@ class QualityGate:
         return duplicate_chars / total_chars
 
     def _html_is_broken(self, markdown: str) -> bool:
+        return self._broken_table_tag_count(markdown) > 0
+
+    def _broken_table_tag_count(self, markdown: str) -> int:
         lowered = markdown.lower()
+        if "<table" not in lowered:
+            return 0
+        missing = 0
         for tag in ("table", "tr", "td", "th"):
             opens = lowered.count(f"<{tag}") - lowered.count(f"</{tag}")
             if opens > 0:
-                return True
-        return False
+                missing += opens
+        return missing

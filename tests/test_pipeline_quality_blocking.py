@@ -187,6 +187,55 @@ def test_pipeline_rerun_applies_retry_planner_concurrency(tmp_path, monkeypatch)
     assert RetryConcurrencyClient.init_concurrency == [4, 1]
 
 
+def test_pipeline_blocks_non_empty_broken_table_html(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText, TableRepairResult
+    from finix_restore.pipeline import Pipeline, PipelineError
+    from finix_restore.table_assembler import TableAssemblyResult
+
+    class BrokenTableClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse_chunks(self, chunks, force_api=False):
+            return [
+                ChunkText(
+                    chunk=chunk,
+                    markdown="<table><tr><td>保障责任",
+                    block_type="table",
+                    source="api",
+                )
+                for chunk in chunks
+            ], 0
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (4800, 3200), "white").save(input_dir / "broken-table.png")
+    output_csv = tmp_path / "submission.csv"
+    config = _config(tmp_path, [input_dir], output_csv)
+    config.quality["max_reruns_per_file"] = 0
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", BrokenTableClient)
+    monkeypatch.setattr(
+        "finix_restore.pipeline.TableRowAssembler.assemble",
+        lambda self, ordered_chunks: TableAssemblyResult(
+            markdown="<table><tr><td>保障责任",
+            warnings=(),
+            assembled_tables=0,
+        ),
+    )
+    monkeypatch.setattr(
+        "finix_restore.pipeline.TableMerger.repair",
+        lambda self, markdown: TableRepairResult(markdown=markdown, repaired_tags=0, warnings=[]),
+    )
+
+    with pytest.raises(PipelineError, match="quality gate failed"):
+        Pipeline(config).run()
+
+    assert not output_csv.exists()
+    summary = json.loads((config.paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["passed"] is False
+    assert summary["risk_counts"]["html_broken"] == 1
+
+
 def test_pipeline_resume_hits_merged_cache_still_records_qc_metric(tmp_path):
     from finix_restore.pipeline import Pipeline
 

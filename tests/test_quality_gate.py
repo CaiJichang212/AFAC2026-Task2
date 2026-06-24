@@ -145,6 +145,18 @@ def test_quality_gate_allows_html_table_fragment(tmp_path):
     assert "full_html_page" not in report.risks
 
 
+def test_quality_gate_reports_table_html_status(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    gate = QualityGate(RunPaths.from_work_dir(tmp_path / "work"))
+
+    healthy = gate.table_html_status("<table><tr><td>A</td></tr></table>")
+    broken = gate.table_html_status("<table><tr><td>A")
+
+    assert healthy["html_broken"] == 0
+    assert broken["html_broken"] > 0
+
+
 def test_retry_planner_maps_risks_to_actions():
     from finix_restore.models import QualityReport
     from finix_restore.retry_planner import RetryPlanner
@@ -158,7 +170,7 @@ def test_retry_planner_maps_risks_to_actions():
     plan = RetryPlanner(max_reruns_per_file=2).plan(report, rerun_count=0)
 
     assert plan["rerun"] is True
-    assert plan["force_api"] is False
+    assert plan["force_api"] is True
     assert plan["window_scale"] == 1.0
     assert plan["overlap_scale"] == 1.5
     assert plan["table_grid_scale"] == 1.0
@@ -180,6 +192,20 @@ def test_retry_planner_for_html_risks_forces_api_and_serial_rerun():
         assert plan["force_api"] is True
         assert plan["concurrency"] == 1
         assert plan["reasons"] == [risk]
+
+
+def test_retry_planner_reruns_html_broken_table_outputs_serially():
+    from finix_restore.models import QualityReport
+    from finix_restore.retry_planner import RetryPlanner
+
+    plan = RetryPlanner(max_reruns_per_file=2).plan(
+        QualityReport(passed=False, risks=["html_broken"], metrics={}),
+        rerun_count=0,
+    )
+
+    assert plan["rerun"] is True
+    assert plan["concurrency"] == 1
+    assert "html_broken" in plan["reasons"]
 
 
 def test_quality_gate_detects_full_html_error_page_but_allows_table_fragment(tmp_path):
