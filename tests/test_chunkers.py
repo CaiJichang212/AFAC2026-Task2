@@ -251,6 +251,20 @@ def test_long_cut_adjusts_to_horizontal_blank_band(tmp_path):
     assert chunks[0].cut_source == "blank_band"
 
 
+def test_long_cutline_planner_prefers_blank_band_and_falls_back_to_fixed_cut():
+    from finix_restore.cutline_planner import LongCutlinePlanner
+
+    planner = LongCutlinePlanner()
+
+    cut = planner.choose_cut(target_y=3200, y0=0, cy1=8000, bands=[(3150, 3230)], search_px=360)
+    assert cut.y1 == 3190
+    assert cut.source == "blank_band"
+
+    fallback = planner.choose_cut(target_y=3200, y0=3199, cy1=8000, bands=[], search_px=360)
+    assert fallback.y1 == 3200
+    assert fallback.source == "fixed_cut"
+
+
 def test_normal_page_chunker_prefers_full_page(tmp_path):
     image_path = tmp_path / "normal.jpg"
     Image.new("RGB", (3000, 3000), "white").save(image_path)

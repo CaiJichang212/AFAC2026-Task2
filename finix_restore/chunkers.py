@@ -9,6 +9,7 @@ from pathlib import Path
 from PIL import Image
 
 from finix_restore.chunk_config import ChunkConfig, LongChunkConfig, TableChunkConfig
+from finix_restore.cutline_planner import LongCutlinePlanner
 from finix_restore.chunk_geometry import (
     box_pixels,
     expand_box,
@@ -85,6 +86,7 @@ class LongStripChunker:
             )
         self.config = config
         self.long_cfg = config.long
+        self.cutline_planner = LongCutlinePlanner()
 
     def chunk(self, profile: ImageProfile, hints: LayoutHints) -> list[Chunk]:
         stem_dir = self.chunks_dir / Path(profile.file_name).stem
@@ -115,22 +117,15 @@ class LongStripChunker:
             if guard > 10000:
                 raise RuntimeError("LongStripChunker exceeded slice iteration guard")
             target_y1 = min(cy1, y0 + window_h)
-            is_last = target_y1 >= cy1
-            if is_last:
-                y1 = cy1
-                cut_source = "dynamic_window"
-            else:
-                adjusted, source = nearest_band_center(
-                    target_y1,
-                    hints.horizontal_blank_bands,
-                    long_cfg.blank_band_search_px,
-                )
-                if source == "blank_band" and adjusted > y0:
-                    y1 = min(cy1, max(y0 + 1, adjusted))
-                    cut_source = "blank_band"
-                else:
-                    y1 = target_y1
-                    cut_source = "dynamic_window"
+            cut = self.cutline_planner.choose_cut(
+                target_y=target_y1,
+                y0=y0,
+                cy1=cy1,
+                bands=hints.horizontal_blank_bands,
+                search_px=long_cfg.blank_band_search_px,
+            )
+            y1 = cut.y1
+            cut_source = cut.source
             if y1 <= y0:
                 y1 = min(cy1, y0 + 1)
             slices.append((y0, y1, cut_source))
