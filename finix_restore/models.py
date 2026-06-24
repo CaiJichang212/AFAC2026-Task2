@@ -51,6 +51,11 @@ class Chunk:
     base_bbox: tuple[int, int, int, int] | None = None
     overlap_bbox: tuple[int, int, int, int] | None = None
     requires_row_assembly: bool = False
+    sent_width: int | None = None
+    sent_height: int | None = None
+    render_scale: float = 1.0
+    variant_kind: str | None = None
+    anchor_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)

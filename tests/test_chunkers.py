@@ -96,6 +96,11 @@ def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
     assert manifest["chunks"][0]["base_bbox"] is not None
     assert manifest["chunks"][0]["overlap_bbox"] == manifest["chunks"][0]["bbox"]
     assert "requires_row_assembly" in manifest["chunks"][0]
+    assert manifest["chunks"][0]["sent_width"] == 3160
+    assert manifest["chunks"][0]["sent_height"] == 2320
+    assert manifest["chunks"][0]["render_scale"] == 1.0
+    assert manifest["chunks"][0]["variant_kind"] == "table_crop"
+    assert manifest["chunks"][0]["anchor_bbox"] is None
 
 
 def test_default_table_config_splits_15m_pixel_pages_for_api_stability():

@@ -61,11 +61,23 @@ def _write_manifest(
     (stem_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _save_crop(source: Path, bbox: tuple[int, int, int, int], out_path: Path) -> None:
+def _save_crop(
+    source: Path,
+    bbox: tuple[int, int, int, int],
+    out_path: Path,
+    scale: float = 1.0,
+) -> tuple[int, int]:
     if out_path.exists():
-        return
+        with Image.open(out_path) as existing:
+            return existing.size
     with Image.open(source) as img:
-        img.crop(bbox).convert("RGB").save(out_path, format="JPEG", quality=95)
+        crop = img.crop(bbox).convert("RGB")
+        if scale < 1.0:
+            width = max(1, int(round(crop.width * scale)))
+            height = max(1, int(round(crop.height * scale)))
+            crop = crop.resize((width, height), Image.Resampling.LANCZOS)
+        crop.save(out_path, format="JPEG", quality=95)
+        return crop.size
 
 
 class LongStripChunker:
@@ -474,7 +486,8 @@ class TableGridChunker:
             cut_source = entry["cut_source"]
             cid = _chunk_id(profile.file_name, bbox, image_sha1)
             out_path = stem_dir / traceable_chunk_name(stem, row, col, bbox)
-            _save_crop(profile.path, bbox, out_path)
+            render_scale = float(entry.get("render_scale", 1.0))
+            sent_width, sent_height = _save_crop(profile.path, bbox, out_path, scale=render_scale)
 
             ovl = overlap_dict(
                 row=row,
@@ -524,6 +537,11 @@ class TableGridChunker:
                     base_bbox=entry.get("base_bbox"),
                     overlap_bbox=entry.get("overlap_bbox", bbox),
                     requires_row_assembly=entry.get("requires_row_assembly", False),
+                    sent_width=sent_width,
+                    sent_height=sent_height,
+                    render_scale=render_scale,
+                    variant_kind=entry.get("variant_kind", "table_crop"),
+                    anchor_bbox=entry.get("anchor_bbox"),
                 )
             )
 
