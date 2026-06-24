@@ -61,3 +61,22 @@ def test_repair_closes_multiple_broken_tables_for_quality_gate(tmp_path):
     assert repaired.repaired_tags > 0
     assert report.passed
     assert "html_broken" not in report.risks
+
+
+def test_repair_preserves_span_empty_td_and_text_order():
+    html = (
+        "前文"
+        "<table><tr><td rowspan=\"2\">A</td><td colspan=\"2\">B</td></tr>"
+        "<tr><td></td><td>C</td></tr>"
+        "后文"
+    )
+
+    repaired = TableMerger().repair(html).markdown
+
+    assert "<html" not in repaired.lower()
+    assert "<body" not in repaired.lower()
+    assert 'rowspan="2"' in repaired
+    assert 'colspan="2"' in repaired
+    assert "<td></td>" in repaired
+    assert repaired.startswith("前文<table>")
+    assert repaired.endswith("</table>后文")

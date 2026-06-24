@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
 
 from finix_restore.models import TableRepairResult
 
@@ -19,6 +19,7 @@ class TableMerger:
         soup = BeautifulSoup(markdown, "html.parser")
         warnings: list[str] = []
         self._merge_adjacent_duplicate_headers(soup, markdown)
+        self._restore_text_outside_tables(soup)
         body = soup.body
         if body is not None:
             rendered = "".join(str(child) for child in body.children)
@@ -67,3 +68,25 @@ class TableMerger:
     def _row_key(self, row) -> tuple[str, ...]:
         cells = row.find_all(["td", "th"])
         return tuple(cell.get_text(strip=True) for cell in cells)
+
+    def _restore_text_outside_tables(self, soup: BeautifulSoup) -> None:
+        for table in soup.find_all("table"):
+            leading_nodes: list[NavigableString] = []
+            trailing_nodes: list[NavigableString] = []
+
+            while table.contents:
+                first = table.contents[0]
+                if not isinstance(first, NavigableString) or not first.strip():
+                    break
+                leading_nodes.append(first.extract())
+
+            while table.contents:
+                last = table.contents[-1]
+                if not isinstance(last, NavigableString) or not last.strip():
+                    break
+                trailing_nodes.append(last.extract())
+
+            for node in reversed(leading_nodes):
+                table.insert_before(node)
+            for node in trailing_nodes:
+                table.insert_after(node)
