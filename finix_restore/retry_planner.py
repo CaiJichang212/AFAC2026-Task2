@@ -11,6 +11,8 @@ class RetryPlanner:
         actions: dict[str, bool | float | int | list[str]] = {
             "rerun": False,
             "force_api": False,
+            "force_rowband": False,
+            "disable_horizontal_split": False,
             "window_scale": 1.0,
             "overlap_scale": 1.0,
             "table_grid_scale": 1.0,
@@ -29,6 +31,12 @@ class RetryPlanner:
             actions["concurrency"] = 1
         if "api_failure_ratio_high" in risks:
             actions["concurrency"] = 1
+        if {"table_count_explosion", "table_assembly_uncertain", "table_reference_missing", "horizontal_split_unmerged"} & risks:
+            actions["force_rowband"] = True
+            actions["concurrency"] = max(1, int(actions["concurrency"]))
+        if {"table_count_explosion", "horizontal_split_unmerged"} & risks:
+            actions["disable_horizontal_split"] = True
+            actions["concurrency"] = max(1, int(actions["concurrency"]))
         if "too_short" in risks:
             actions["overlap_scale"] = 1.5
             if report.metrics.get("doc_type") == "table_page":

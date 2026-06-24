@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -251,3 +252,91 @@ def test_pipeline_resume_hits_merged_cache_still_records_qc_metric(tmp_path):
     assert report.passed
     qc = json.loads((config.paths.qc_dir / "cached.json").read_text(encoding="utf-8"))
     assert qc["metrics"]["from_merged_cache"] == 1
+
+
+def test_pipeline_retry_can_rechunk_with_rowband_policy(tmp_path, monkeypatch):
+    from finix_restore.models import Chunk, ImageProfile, QualityReport
+    from finix_restore.pipeline import Pipeline
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    image_path = input_dir / "table.png"
+    Image.new("RGB", (800, 600), "white").save(image_path)
+    config = _config(tmp_path, [input_dir], tmp_path / "submission.csv")
+    config.quality["max_reruns_per_file"] = 1
+
+    pipeline = Pipeline(config)
+    chunk_calls: list[tuple[str, bool]] = []
+    process_calls = {"count": 0}
+
+    monkeypatch.setattr(
+        pipeline.profiler,
+        "profile_and_write",
+        lambda image_path, out_dir: ImageProfile(
+            file_name=image_path.name,
+            path=image_path,
+            width=800,
+            height=600,
+            pixels=480000,
+            aspect=800 / 600,
+            doc_type="table_page",
+            risk_level="low",
+        ),
+    )
+    monkeypatch.setattr(pipeline.layout_sentry, "analyze", lambda _: None)
+
+    def fake_chunk(profile, hints, chunk_config=None):
+        assert chunk_config is not None
+        chunk_calls.append((chunk_config.table.policy_version, chunk_config.table.allow_horizontal_split))
+        return [
+            Chunk(
+                chunk_id=f"chunk-{len(chunk_calls)}",
+                file_name=profile.file_name,
+                image_path=Path("/tmp/table.jpg"),
+                bbox=(0, 0, 100, 100),
+                row=0,
+                col=0,
+                overlap={"left": 0, "right": 0, "top": 0, "bottom": 0},
+                image_sha1="sha1",
+            )
+        ]
+
+    def fake_process_image_once(chunks, profile, force_api=False, concurrency_override=None, table_policy=None):
+        process_calls["count"] += 1
+        if process_calls["count"] == 1:
+            return (
+                ("A" * 5001) + "<table><tr><td>A</td></tr></table>",
+                0,
+                {
+                    "table_assembled_tables": 1,
+                    "table_assembly_warning_count": 0,
+                    "table_count": 12,
+                    "table_count_before_assembly": 12,
+                    "horizontal_split_chunks": 2,
+                    "table_reference_chunks": 0,
+                    "table_policy": "table_grid_v2",
+                    "table_repaired_tags": 0,
+                },
+            )
+        return (
+            ("B" * 5001) + "<table><tr><td>A</td></tr></table>",
+            0,
+            {
+                "table_assembled_tables": 1,
+                "table_assembly_warning_count": 0,
+                "table_count": 1,
+                "table_count_before_assembly": 2,
+                "horizontal_split_chunks": 0,
+                "table_reference_chunks": 1,
+                "table_policy": "table_rowband_v2",
+                "table_repaired_tags": 0,
+            },
+        )
+
+    monkeypatch.setattr(pipeline, "_chunk", fake_chunk)
+    monkeypatch.setattr(pipeline, "_process_image_once", fake_process_image_once)
+
+    processed = pipeline._process_image(image_path)
+
+    assert processed.quality.passed is True
+    assert chunk_calls == [("grid_v2", True), ("rowband_v2", False)]

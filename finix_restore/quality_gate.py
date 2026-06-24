@@ -117,6 +117,7 @@ class QualityGate:
         }
         if extra_metrics:
             metrics.update(extra_metrics)
+        risks.extend(self._table_v2_risks(doc_type, chunk_count, metrics))
         report = QualityReport(
             passed=not risks,
             risks=list(dict.fromkeys(risks)),
@@ -238,3 +239,48 @@ class QualityGate:
             if opens > 0:
                 missing += opens
         return missing
+
+    def _table_v2_risks(
+        self,
+        doc_type: DocType,
+        chunk_count: int,
+        metrics: dict[str, float | int | str],
+    ) -> list[str]:
+        if doc_type != "table_page":
+            return []
+
+        risks: list[str] = []
+        table_count = self._metric_int(metrics, "table_count")
+        if table_count is not None and table_count > max(3, chunk_count // 2):
+            risks.append("table_count_explosion")
+
+        warnings = str(metrics.get("table_assembly_warnings") or "")
+        if "row_alignment_uncertain" in warnings or "table_assembly_uncertain" in warnings:
+            risks.append("table_assembly_uncertain")
+
+        table_policy = str(metrics.get("table_policy") or "")
+        reference_chunks = self._metric_int(metrics, "table_reference_chunks")
+        if table_policy == "table_rowband_v2" and reference_chunks == 0:
+            risks.append("table_reference_missing")
+
+        horizontal_split_chunks = self._metric_int(metrics, "horizontal_split_chunks")
+        table_count_before = self._metric_int(metrics, "table_count_before_assembly")
+        if (
+            horizontal_split_chunks is not None
+            and horizontal_split_chunks > 0
+            and table_count is not None
+            and table_count_before is not None
+            and table_count >= table_count_before
+        ):
+            risks.append("horizontal_split_unmerged")
+
+        return risks
+
+    def _metric_int(self, metrics: dict[str, float | int | str], key: str) -> int | None:
+        value = metrics.get(key)
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None

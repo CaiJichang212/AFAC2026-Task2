@@ -272,3 +272,46 @@ def test_quality_gate_writes_run_summary_json(tmp_path):
 
     persisted = json.loads((paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
     assert persisted == summary
+
+
+def test_quality_gate_flags_table_v2_specific_risks(tmp_path):
+    from finix_restore.quality_gate import QualityGate
+
+    gate = QualityGate(RunPaths.from_work_dir(tmp_path / "work"))
+
+    report = gate.check_file(
+        file_name="table-v2.png",
+        markdown=("X" * 5001) + "<table><tr><td>A",
+        doc_type="table_page",
+        chunk_count=8,
+        failed_chunks=0,
+        extra_metrics={
+            "table_count": 12,
+            "table_count_before_assembly": 12,
+            "horizontal_split_chunks": 2,
+            "table_reference_chunks": 0,
+            "table_policy": "table_rowband_v2",
+            "table_assembly_warnings": "row_alignment_uncertain",
+        },
+    )
+
+    assert "table_count_explosion" in report.risks
+    assert "table_assembly_uncertain" in report.risks
+    assert "horizontal_split_unmerged" in report.risks
+    assert "table_reference_missing" in report.risks
+    assert "html_broken" in report.risks
+
+    missing_metrics = gate.check_file(
+        file_name="table-v2-missing.json",
+        markdown=("Y" * 5001) + "<table><tr><td>A</td></tr></table>",
+        doc_type="table_page",
+        chunk_count=8,
+        failed_chunks=0,
+        extra_metrics={
+            "table_count": 12,
+            "table_policy": "table_rowband_v2",
+            "table_reference_chunks": 1,
+        },
+    )
+
+    assert "horizontal_split_unmerged" not in missing_metrics.risks

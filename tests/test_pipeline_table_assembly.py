@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 from PIL import Image
 
@@ -71,6 +73,16 @@ def test_pipeline_assembles_split_table_chunks_into_single_rows(tmp_path, monkey
 
     report = Pipeline(config).run()
     df = pd.read_csv(config.output_csv)
+    qc = json.loads((config.paths.qc_dir / "table.json").read_text(encoding="utf-8"))
 
     assert report.passed
     assert "<td>终身</td><td>1</td><td>男</td><td>2176</td>" in df.loc[0, "ground_truth"]
+    metrics = qc["metrics"]
+    assert "table_assembled_tables" in metrics
+    assert "table_assembly_warning_count" in metrics
+    assert "table_count" in metrics
+    assert "table_count_before_assembly" in metrics
+    assert "horizontal_split_chunks" in metrics
+    assert "table_reference_chunks" in metrics
+    assert "table_policy" in metrics
+    assert "table_repaired_tags" in metrics

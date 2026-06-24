@@ -4,6 +4,7 @@ import json
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
@@ -122,7 +123,8 @@ class Pipeline:
             )
 
         hints = self.layout_sentry.analyze(image_path)
-        chunks = self._chunk(profile, hints)
+        chunk_config = self.config.chunk
+        chunks = self._chunk(profile, hints, chunk_config=chunk_config)
 
         if self.config.dry_run:
             markdown = ""
@@ -144,6 +146,7 @@ class Pipeline:
                 profile,
                 force_api=force_api,
                 concurrency_override=concurrency_override,
+                table_policy=self._table_chunk_policy(chunk_config) if profile.doc_type == "table_page" else None,
             )
             quality = self.quality_gate.check_file(
                 profile.file_name,
@@ -165,6 +168,13 @@ class Pipeline:
             force_api = bool(plan["force_api"])
             planned_concurrency = int(plan["concurrency"])
             concurrency_override = planned_concurrency if planned_concurrency > 0 else None
+            if profile.doc_type == "table_page" and (bool(plan["force_rowband"]) or bool(plan["disable_horizontal_split"])):
+                chunk_config = self._retry_table_chunk_config(
+                    chunk_config,
+                    force_rowband=bool(plan["force_rowband"]),
+                    disable_horizontal_split=bool(plan["disable_horizontal_split"]),
+                )
+                chunks = self._chunk(profile, hints, chunk_config=chunk_config)
 
     def _process_image_once(
         self,
@@ -172,6 +182,7 @@ class Pipeline:
         profile: ImageProfile,
         force_api: bool = False,
         concurrency_override: int | None = None,
+        table_policy: str | None = None,
     ) -> tuple[str, int, dict[str, float | int | str]]:
         chunk_texts, failed_chunks = self._parse_chunks(
             chunks,
@@ -183,12 +194,22 @@ class Pipeline:
         ordered = self.order_resolver.resolve(normalized, doc_type=profile.doc_type)
         extra_metrics: dict[str, float | int | str] = {}
         if profile.doc_type == "table_page":
+            extra_metrics["table_count_before_assembly"] = sum(
+                chunk_text.markdown.lower().count("<table") for chunk_text in normalized
+            )
+            extra_metrics["horizontal_split_chunks"] = sum(
+                1 for chunk_text in ordered if "horizontal_split" in chunk_text.chunk.risk_flags
+            )
+            extra_metrics["table_reference_chunks"] = sum(
+                1 for chunk_text in ordered if chunk_text.chunk.variant_kind == "full_page_reference"
+            )
+            extra_metrics["table_policy"] = table_policy or self._table_chunk_policy(self.config.chunk)
             assembled = self.table_assembler.assemble(ordered)
             repaired = self.table_merger.repair(assembled.markdown)
             extra_metrics["table_assembled_tables"] = assembled.assembled_tables
             extra_metrics["table_assembly_warning_count"] = len(assembled.warnings)
-            if assembled.warnings:
-                extra_metrics["table_assembly_warnings"] = ",".join(assembled.warnings)
+            extra_metrics["table_assembly_warnings"] = ",".join(assembled.warnings)
+            extra_metrics["table_count"] = repaired.markdown.lower().count("<table")
         else:
             merged = self.dedup.merge(ordered)
             repaired = self.table_merger.repair(merged.markdown)
@@ -228,23 +249,36 @@ class Pipeline:
             return global_limit
         return max(1, min(global_limit, (global_limit + image_concurrency - 1) // image_concurrency))
 
-    def _chunk(self, profile: ImageProfile, hints: LayoutHints):
+    def _chunk(self, profile: ImageProfile, hints: LayoutHints, chunk_config=None):
+        if chunk_config is None:
+            chunk_config = self.config.chunk
         if profile.doc_type == "long_strip":
             chunker = LongStripChunker(
                 self.config.paths.chunks_dir,
-                config=self.config.chunk,
+                config=chunk_config,
             )
         elif profile.doc_type == "table_page":
             chunker = TableGridChunker(
                 self.config.paths.chunks_dir,
-                config=self.config.chunk,
+                config=chunk_config,
             )
         else:
             chunker = PageChunker(
                 self.config.paths.chunks_dir,
-                config=self.config.chunk,
+                config=chunk_config,
             )
         return chunker.chunk(profile, hints)
+
+    def _table_chunk_policy(self, chunk_config) -> str:
+        return "table_rowband_v2" if chunk_config.table.policy_version == "rowband_v2" else "table_grid_v2"
+
+    def _retry_table_chunk_config(self, chunk_config, *, force_rowband: bool, disable_horizontal_split: bool):
+        table_config = replace(
+            chunk_config.table,
+            policy_version="rowband_v2" if force_rowband else chunk_config.table.policy_version,
+            allow_horizontal_split=False if disable_horizontal_split else chunk_config.table.allow_horizontal_split,
+        )
+        return replace(chunk_config, table=table_config)
 
     def _write_merged(self, file_name: str, markdown: str) -> None:
         self.config.paths.merged_dir.mkdir(parents=True, exist_ok=True)
