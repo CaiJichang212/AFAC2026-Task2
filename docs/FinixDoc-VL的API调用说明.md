@@ -28,6 +28,7 @@ POST 表单上传图片，仅支持图片输入，返回对应的 Markdown 解�
 
 ```bash
 curl -X POST 'https://finixdocapi.alipay.com/api/finix_doc/call_with_file' \
+  -H 'Expect:' \
   -F 'userId=finixB2002' \
   -F 'apiKey=${FINIX_API_KEY}' \
   -F 'fileName=finixdoc.png' \
@@ -35,6 +36,8 @@ curl -X POST 'https://finixdocapi.alipay.com/api/finix_doc/call_with_file' \
 ```
 
 请将示例中的 fileName 和本地图片路径替换为自己的实际文件名和文件路径。
+
+> 关于 `-H 'Expect:'`：表示不发送 `Expect: 100-continue`，可避免部分网关/代理在上传前等待。如果使用 Java、Python、前端 SDK 调用，请检查 HTTP Client 是否自动添加了 `Expect: 100-continue`；如出现上传慢，可显式关闭或移除该请求头。本项目 `finix_restore/finix_api.py` 在 `_post_chunk` 中已通过 `headers={"Expect": ""}` 关闭该行为。
 
 ### 四、参数说明
 

@@ -149,6 +149,8 @@ class FinixApiClient:
             "apiKey": self.api_key,
             "fileName": chunk.image_path.name,
         }
+        # 显式发送空 Expect 头, 避免部分网关/代理对 Expect: 100-continue 的等待导致上传变慢。
+        headers = {"Expect": ""}
         try:
             with chunk.image_path.open("rb") as f:
                 files = {"file": (chunk.image_path.name, f)}
@@ -157,6 +159,7 @@ class FinixApiClient:
                         self.api_url,
                         data=data,
                         files=files,
+                        headers=headers,
                         timeout=self.timeout_seconds,
                     )
         except (requests.Timeout, requests.RequestException) as exc:

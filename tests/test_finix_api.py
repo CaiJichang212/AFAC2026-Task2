@@ -20,8 +20,10 @@ class FakeSession:
         self.responses = responses
         self.calls = []
 
-    def post(self, url, data=None, files=None, timeout=None):
-        self.calls.append({"url": url, "data": data, "files": files, "timeout": timeout})
+    def post(self, url, data=None, files=None, headers=None, timeout=None):
+        self.calls.append(
+            {"url": url, "data": data, "files": files, "headers": headers, "timeout": timeout}
+        )
         return self.responses.pop(0)
 
 
@@ -69,6 +71,7 @@ def test_parse_chunk_posts_multipart_and_redacts_api_key(tmp_path):
     assert call["data"]["apiKey"] == "secret-key"
     assert call["data"]["fileName"] == "chunk-a.jpg"
     assert "file" in call["files"]
+    assert call["headers"] == {"Expect": ""}
     raw_path = paths.api_raw_dir / "doc" / "chunk-a.md"
     assert raw_path.read_text(encoding="utf-8") == "# parsed"
     meta = json.loads((paths.api_raw_dir / "doc" / "chunk-a.json").read_text(encoding="utf-8"))
@@ -423,9 +426,9 @@ def test_post_chunk_uses_limiter_around_http_request(tmp_path):
             super().__init__([FakeResponse(200, "# ok")])
             self.limiter = limiter
 
-        def post(self, url, data=None, files=None, timeout=None):
+        def post(self, url, data=None, files=None, headers=None, timeout=None):
             self.limiter.post_happened_inside_limiter = self.limiter.active
-            return super().post(url, data=data, files=files, timeout=timeout)
+            return super().post(url, data=data, files=files, headers=headers, timeout=timeout)
 
     paths = RunPaths.from_work_dir(tmp_path / "work")
     limiter = TrackingLimiter()
