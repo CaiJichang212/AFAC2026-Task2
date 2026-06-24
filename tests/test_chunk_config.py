@@ -84,6 +84,52 @@ def test_to_dict_returns_plain_nested_dict_yaml_safe():
     assert "target_pixels: 3000000" in rendered
 
 
+def test_table_v2_mapping_reads_new_policy_fields():
+    cfg = ChunkConfig.from_mapping(
+        {
+            "table": {
+                "policy_version": "rowband_v2",
+                "full_page_reference_max_pixels": 14_000_000,
+                "row_band_target_pixels": 8_000_000,
+                "row_band_safe_pixels": 12_000_000,
+                "min_crop_coverage": 0.55,
+                "preserve_full_width": True,
+                "allow_horizontal_split": True,
+                "anchor_left_px": 640,
+            }
+        }
+    )
+
+    assert cfg.table.policy_version == "rowband_v2"
+    assert cfg.table.full_page_reference_max_pixels == 14_000_000
+    assert cfg.table.row_band_target_pixels == 8_000_000
+    assert cfg.table.row_band_safe_pixels == 12_000_000
+    assert cfg.table.min_crop_coverage == 0.55
+    assert cfg.table.preserve_full_width is True
+    assert cfg.table.allow_horizontal_split is True
+    assert cfg.table.anchor_left_px == 640
+
+
+def test_table_v2_defaults_are_stable_and_serializable():
+    cfg = ChunkConfig.from_mapping({})
+
+    assert cfg.table.policy_version == "grid_v2"
+    assert cfg.table.full_page_reference_max_pixels == 14_000_000
+    assert cfg.table.row_band_target_pixels == 8_000_000
+    assert cfg.table.row_band_safe_pixels == 12_000_000
+    assert cfg.table.min_crop_coverage == 0.55
+    assert cfg.table.preserve_full_width is True
+    assert cfg.table.allow_horizontal_split is True
+    assert cfg.table.anchor_left_px == 640
+
+    payload = cfg.to_dict()
+    assert payload["table"]["policy_version"] == "grid_v2"
+    assert payload["table"]["full_page_reference_max_pixels"] == 14_000_000
+    assert payload["table"]["row_band_target_pixels"] == 8_000_000
+    assert payload["table"]["row_band_safe_pixels"] == 12_000_000
+    assert payload["table"]["anchor_left_px"] == 640
+
+
 def test_legacy_flat_key_lookup_via_get_for_backwards_compat():
     cfg = ChunkConfig.from_mapping(
         {

@@ -22,6 +22,14 @@ class TableChunkConfig:
     horizontal_overlap: int = 160
     vertical_overlap: int = 220
     cut_search_px: int = 260
+    policy_version: str = "grid_v2"
+    full_page_reference_max_pixels: int = 14_000_000
+    row_band_target_pixels: int = 8_000_000
+    row_band_safe_pixels: int = 12_000_000
+    min_crop_coverage: float = 0.55
+    preserve_full_width: bool = True
+    allow_horizontal_split: bool = True
+    anchor_left_px: int = 640
 
 
 @dataclass(frozen=True)
