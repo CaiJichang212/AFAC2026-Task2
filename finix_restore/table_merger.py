@@ -19,7 +19,12 @@ class TableMerger:
         soup = BeautifulSoup(markdown, "html.parser")
         warnings: list[str] = []
         self._merge_adjacent_duplicate_headers(soup, markdown)
-        return TableRepairResult(markdown=soup.decode(formatter="minimal"), repaired_tags=repaired_tags, warnings=warnings)
+        body = soup.body
+        if body is not None:
+            rendered = "".join(str(child) for child in body.children)
+        else:
+            rendered = soup.decode(formatter="minimal")
+        return TableRepairResult(markdown=rendered, repaired_tags=repaired_tags, warnings=warnings)
 
     def _count_missing_closing_tags(self, html: str) -> int:
         missing = 0
