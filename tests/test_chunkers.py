@@ -89,7 +89,7 @@ def test_table_grid_chunks_respect_bounds_and_max_pixels(tmp_path):
     last_chunk = manifest["chunks"][-1]
     assert last_chunk["is_last_row"] is True
     assert last_chunk["is_last_col"] is True
-    assert last_chunk["cut_source"] in {"full_page", "grid"}
+    assert last_chunk["cut_source"] in {"full_page", "fixed_cut", "blank_band"}
     assert isinstance(last_chunk["risk_flags"], list)
     assert manifest["chunks"][0]["row_band"] == 0
     assert manifest["chunks"][0]["col_band"] == 0
