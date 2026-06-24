@@ -29,8 +29,8 @@ def _file_sha1(path: Path) -> str:
     return h.hexdigest()
 
 
-def _chunk_id(file_name: str, bbox: tuple[int, int, int, int], image_sha1: str) -> str:
-    raw = f"{file_name}:{bbox}:{image_sha1}".encode("utf-8")
+def _chunk_id(file_name: str, bbox: tuple[int, int, int, int], image_sha1: str, salt: str = "") -> str:
+    raw = f"{file_name}:{bbox}:{image_sha1}:{salt}".encode("utf-8")
     return hashlib.sha1(raw).hexdigest()[:16]
 
 
@@ -73,8 +73,8 @@ def _save_crop(
     with Image.open(source) as img:
         crop = img.crop(bbox).convert("RGB")
         if scale < 1.0:
-            width = max(1, int(round(crop.width * scale)))
-            height = max(1, int(round(crop.height * scale)))
+            width = max(1, int(crop.width * scale))
+            height = max(1, int(crop.height * scale))
             crop = crop.resize((width, height), Image.Resampling.LANCZOS)
         crop.save(out_path, format="JPEG", quality=95)
         return crop.size
@@ -259,8 +259,8 @@ class TableGridChunker:
         plan = self.table_planner.plan(profile, hints, self.config)
         entries: list[dict] = []
         for entry in plan.entries:
-            horizontal_overlap = self.table_cfg.horizontal_overlap if entry.cols > 1 else 0
-            vertical_overlap = self.table_cfg.vertical_overlap if entry.rows > 1 else 0
+            horizontal_overlap = self.table_cfg.horizontal_overlap if entry.cols > 1 and entry.row_band >= 0 else 0
+            vertical_overlap = self.table_cfg.vertical_overlap if entry.rows > 1 and entry.row_band >= 0 else 0
             entries.append(
                 {
                     "bbox": entry.crop_bbox,
@@ -274,9 +274,15 @@ class TableGridChunker:
                     "table_group_id": Path(profile.file_name).stem,
                     "row_band": entry.row_band,
                     "col_band": entry.col_band,
-                    "requires_row_assembly": entry.rows > 1 or entry.cols > 1,
+                    "requires_row_assembly": entry.variant_kind != "full_page_reference" and (entry.rows > 1 or entry.cols > 1),
                     "horizontal_overlap": horizontal_overlap,
                     "vertical_overlap": vertical_overlap,
+                    "risk_flags": entry.risk_flags,
+                    "render_scale": entry.render_scale,
+                    "variant_kind": entry.variant_kind,
+                    "sent_width": entry.sent_width,
+                    "sent_height": entry.sent_height,
+                    "anchor_bbox": entry.anchor_bbox,
                 }
             )
 
@@ -284,7 +290,7 @@ class TableGridChunker:
             profile,
             content_box=plan.content_box,
             entries=entries,
-            chunk_policy="table_grid_v2",
+            chunk_policy="table_rowband_v2" if self.table_cfg.policy_version == "rowband_v2" else "table_grid_v2",
             safe_max=self.table_cfg.safe_max_pixels,
         )
 
@@ -484,23 +490,27 @@ class TableGridChunker:
             rows = entry["rows"]
             cols = entry["cols"]
             cut_source = entry["cut_source"]
-            cid = _chunk_id(profile.file_name, bbox, image_sha1)
+            variant_kind = entry.get("variant_kind", "table_crop")
+            cid = _chunk_id(profile.file_name, bbox, image_sha1, salt=f"{variant_kind}:{row}:{col}")
             out_path = stem_dir / traceable_chunk_name(stem, row, col, bbox)
             render_scale = float(entry.get("render_scale", 1.0))
             sent_width, sent_height = _save_crop(profile.path, bbox, out_path, scale=render_scale)
 
-            ovl = overlap_dict(
-                row=row,
-                col=col,
-                rows=rows,
-                cols=cols,
-                horizontal=entry["horizontal_overlap"],
-                vertical=entry["vertical_overlap"],
-            )
+            if row < 0 or col < 0:
+                ovl = overlap_dict(row=0, col=0, rows=1, cols=1, horizontal=0, vertical=0)
+            else:
+                ovl = overlap_dict(
+                    row=row,
+                    col=col,
+                    rows=rows,
+                    cols=cols,
+                    horizontal=entry["horizontal_overlap"],
+                    vertical=entry["vertical_overlap"],
+                )
 
             chunk_pixels = box_pixels(bbox)
 
-            flags: list[str] = []
+            flags: list[str] = list(entry.get("risk_flags", ()))
             if chunk_pixels > safe_max:
                 flags.append("over_safe_pixels")
             if chunk_pixels > hard_max:
@@ -527,8 +537,8 @@ class TableGridChunker:
                     overlap=ovl,
                     image_sha1=image_sha1,
                     chunk_pixels=chunk_pixels,
-                    is_last_row=row == rows - 1,
-                    is_last_col=col == cols - 1,
+                    is_last_row=row < 0 or row == rows - 1,
+                    is_last_col=col < 0 or col == cols - 1,
                     cut_source=cut_source,
                     risk_flags=tuple(unique_flags),
                     table_group_id=entry.get("table_group_id"),
@@ -540,7 +550,7 @@ class TableGridChunker:
                     sent_width=sent_width,
                     sent_height=sent_height,
                     render_scale=render_scale,
-                    variant_kind=entry.get("variant_kind", "table_crop"),
+                    variant_kind=variant_kind,
                     anchor_bbox=entry.get("anchor_bbox"),
                 )
             )

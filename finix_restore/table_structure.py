@@ -3,9 +3,10 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from finix_restore.chunk_config import ChunkConfig
-from finix_restore.chunk_geometry import expand_box, nearest_band_center
+from finix_restore.chunk_config import ChunkConfig, TableChunkConfig
+from finix_restore.chunk_geometry import box_pixels, expand_box, nearest_band_center
 from finix_restore.models import ImageProfile, LayoutHints
+from finix_restore.table_image_policy import TableImagePolicy, TableImageVariant
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,11 @@ class TablePlanEntry:
     cols: int
     cut_source: str
     risk_flags: tuple[str, ...]
+    render_scale: float = 1.0
+    variant_kind: str = "table_crop"
+    sent_width: int | None = None
+    sent_height: int | None = None
+    anchor_bbox: tuple[int, int, int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,11 @@ class TablePlan:
 
 class TableStructurePlanner:
     def plan(self, profile: ImageProfile, hints: LayoutHints, config: ChunkConfig) -> TablePlan:
+        if config.table.policy_version == "rowband_v2":
+            return self._plan_rowband_v2(profile, hints, config)
+        return self._plan_grid_v1(profile, hints, config)
+
+    def _plan_grid_v1(self, profile: ImageProfile, hints: LayoutHints, config: ChunkConfig) -> TablePlan:
         table_cfg = config.table
         content_box = self._resolve_content_box(profile, hints, config)
         cx0, cy0, cx1, cy1 = content_box
@@ -141,6 +152,190 @@ class TableStructurePlanner:
             entries=tuple(entries),
             policy="table_structure_v1",
         )
+
+    def _plan_rowband_v2(self, profile: ImageProfile, hints: LayoutHints, config: ChunkConfig) -> TablePlan:
+        table_cfg = config.table
+        image_plan = TableImagePolicy().plan(profile, hints, config)
+        content_box = image_plan.content_box
+        cx0, cy0, cx1, cy1 = content_box
+        content_width = max(1, cx1 - cx0)
+        target_height = max(1, table_cfg.row_band_target_pixels // content_width)
+
+        band_slices: list[tuple[int, int, str]] = []
+        y0 = cy0
+        guard = 0
+        while y0 < cy1:
+            guard += 1
+            if guard > 10000:
+                raise RuntimeError("TableStructurePlanner exceeded row-band iteration guard")
+            target_y1 = min(cy1, y0 + target_height)
+            cut_y1, source = nearest_band_center(target_y1, hints.horizontal_blank_bands, table_cfg.cut_search_px)
+            if source == "blank_band" and y0 < cut_y1 <= cy1:
+                y1 = cut_y1
+                cut_source = "blank_band"
+            else:
+                y1 = target_y1
+                cut_source = "row_band"
+            if y1 <= y0:
+                y1 = min(cy1, y0 + max(1, target_height))
+                cut_source = "row_band"
+            band_slices.append((y0, y1, cut_source))
+            if y1 >= cy1:
+                break
+            next_y0 = y1 - table_cfg.vertical_overlap if table_cfg.vertical_overlap else y1
+            if next_y0 <= y0:
+                next_y0 = y0 + 1
+            y0 = next_y0
+
+        entries: list[TablePlanEntry] = []
+        if image_plan.reference is not None:
+            entries.append(self._reference_entry(image_plan.reference))
+
+        rows = len(band_slices)
+        for row_band, (base_y0, base_y1, cut_source) in enumerate(band_slices):
+            crop_y0 = max(cy0, base_y0 - (table_cfg.vertical_overlap if row_band > 0 else 0))
+            crop_y1 = min(cy1, base_y1 + (table_cfg.vertical_overlap if row_band < rows - 1 else 0))
+            base_bbox = (cx0, base_y0, cx1, base_y1)
+            crop_bbox = (cx0, crop_y0, cx1, crop_y1)
+            entries.extend(
+                self._row_band_entries(
+                    base_bbox=base_bbox,
+                    crop_bbox=crop_bbox,
+                    row_band=row_band,
+                    rows=rows,
+                    cut_source=cut_source,
+                    table_cfg=table_cfg,
+                )
+            )
+
+        return TablePlan(
+            content_box=content_box,
+            entries=tuple(entries),
+            policy="table_structure_rowband_v2",
+        )
+
+    def _reference_entry(self, variant: TableImageVariant) -> TablePlanEntry:
+        return TablePlanEntry(
+            base_bbox=variant.source_bbox,
+            crop_bbox=variant.source_bbox,
+            row_band=-1,
+            col_band=0,
+            rows=1,
+            cols=1,
+            cut_source="full_page_reference",
+            risk_flags=variant.risk_flags,
+            render_scale=variant.scale,
+            variant_kind=variant.kind,
+            sent_width=variant.sent_width,
+            sent_height=variant.sent_height,
+            anchor_bbox=None,
+        )
+
+    def _row_band_entries(
+        self,
+        base_bbox: tuple[int, int, int, int],
+        crop_bbox: tuple[int, int, int, int],
+        row_band: int,
+        rows: int,
+        cut_source: str,
+        table_cfg: TableChunkConfig,
+    ) -> list[TablePlanEntry]:
+        full_width_scale, full_width_size = self._scaled_size(crop_bbox, table_cfg.row_band_target_pixels, table_cfg.row_band_safe_pixels)
+        allow_split = (
+            table_cfg.allow_horizontal_split
+            and not table_cfg.preserve_full_width
+            and full_width_scale < 0.5
+            and (crop_bbox[2] - crop_bbox[0]) > table_cfg.anchor_left_px * 2
+        )
+        if allow_split:
+            return self._horizontal_split_entries(
+                base_bbox=base_bbox,
+                crop_bbox=crop_bbox,
+                row_band=row_band,
+                rows=rows,
+                table_cfg=table_cfg,
+            )
+
+        return [
+            TablePlanEntry(
+                base_bbox=base_bbox,
+                crop_bbox=crop_bbox,
+                row_band=row_band,
+                col_band=0,
+                rows=rows,
+                cols=1,
+                cut_source=cut_source,
+                risk_flags=(),
+                render_scale=full_width_scale,
+                variant_kind="table_crop",
+                sent_width=full_width_size[0],
+                sent_height=full_width_size[1],
+                anchor_bbox=None,
+            )
+        ]
+
+    def _horizontal_split_entries(
+        self,
+        base_bbox: tuple[int, int, int, int],
+        crop_bbox: tuple[int, int, int, int],
+        row_band: int,
+        rows: int,
+        table_cfg: TableChunkConfig,
+    ) -> list[TablePlanEntry]:
+        bx0, by0, bx1, by1 = base_bbox
+        cx0, cy0, cx1, cy1 = crop_bbox
+        split_x = min(bx1 - 1, max(bx0 + 1, bx0 + table_cfg.anchor_left_px))
+        anchor_bbox = (bx0, by0, min(bx1, bx0 + table_cfg.anchor_left_px), by1)
+        raw_entries = [
+            (
+                0,
+                (bx0, by0, split_x, by1),
+                (cx0, cy0, min(cx1, split_x + table_cfg.horizontal_overlap), cy1),
+            ),
+            (
+                1,
+                (split_x, by0, bx1, by1),
+                (max(cx0, split_x - table_cfg.horizontal_overlap), cy0, cx1, cy1),
+            ),
+        ]
+        entries: list[TablePlanEntry] = []
+        for col_band, col_base_bbox, col_crop_bbox in raw_entries:
+            scale, sent_size = self._scaled_size(col_crop_bbox, table_cfg.row_band_target_pixels, table_cfg.row_band_safe_pixels)
+            entries.append(
+                TablePlanEntry(
+                    base_bbox=col_base_bbox,
+                    crop_bbox=col_crop_bbox,
+                    row_band=row_band,
+                    col_band=col_band,
+                    rows=rows,
+                    cols=2,
+                    cut_source="horizontal_fallback",
+                    risk_flags=("horizontal_split",),
+                    render_scale=scale,
+                    variant_kind="table_crop",
+                    sent_width=sent_size[0],
+                    sent_height=sent_size[1],
+                    anchor_bbox=anchor_bbox,
+                )
+            )
+        return entries
+
+    @staticmethod
+    def _scaled_size(
+        bbox: tuple[int, int, int, int],
+        target_pixels: int,
+        safe_pixels: int,
+    ) -> tuple[float, tuple[int, int]]:
+        width = max(1, bbox[2] - bbox[0])
+        height = max(1, bbox[3] - bbox[1])
+        pixels = box_pixels(bbox)
+        budget = max(1, min(target_pixels, safe_pixels))
+        if pixels <= budget:
+            return 1.0, (width, height)
+        scale = math.sqrt(budget / pixels)
+        sent_width = max(1, int(width * scale))
+        sent_height = max(1, int(height * scale))
+        return scale, (sent_width, sent_height)
 
     @staticmethod
     def _resolve_content_box(

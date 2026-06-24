@@ -52,8 +52,8 @@ class TableImagePolicy:
 
     def _build_reference(self, profile: ImageProfile, config: ChunkConfig) -> TableImageVariant:
         scale = self._fit_scale(profile.width, profile.height, config.table.full_page_reference_max_pixels)
-        sent_width = max(1, int(round(profile.width * scale)))
-        sent_height = max(1, int(round(profile.height * scale)))
+        sent_width = max(1, int(profile.width * scale))
+        sent_height = max(1, int(profile.height * scale))
         risk_flags: list[str] = []
         if scale < 1.0:
             risk_flags.append("downscaled_reference")

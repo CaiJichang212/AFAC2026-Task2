@@ -372,6 +372,36 @@ def test_chunk_image_path_uses_traceable_filename(tmp_path):
         assert "_w" in Path(entry["image_path"]).name
 
 
+def test_table_rowband_chunker_writes_reference_and_render_metadata(tmp_path):
+    image_path = tmp_path / "rowband.jpg"
+    Image.new("RGB", (2400, 1800), "white").save(image_path)
+    profile = _profile(image_path, 2400, 1800, "table_page")
+    hints = LayoutHints((0, 0, 2400, 1800), [(300, 340), (620, 660)], [], 0.5, 1)
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "policy_version": "rowband_v2",
+            "full_page_reference_max_pixels": 800_000,
+            "row_band_target_pixels": 300_000,
+            "row_band_safe_pixels": 400_000,
+            "allow_horizontal_split": False,
+        }
+    })
+
+    chunks = TableGridChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert len(chunks) > 2
+    assert chunks[0].variant_kind == "full_page_reference"
+    assert chunks[0].row == -1
+    assert chunks[0].sent_width * chunks[0].sent_height <= 800_000
+    assert all(chunk.variant_kind in {"full_page_reference", "table_crop"} for chunk in chunks)
+    assert any(chunk.row_band == 0 for chunk in chunks[1:])
+
+    manifest = json.loads((tmp_path / "chunks" / "rowband" / "manifest.json").read_text())
+    assert manifest["chunk_policy"] == "table_rowband_v2"
+    assert manifest["chunks"][0]["variant_kind"] == "full_page_reference"
+    assert manifest["chunks"][0]["sent_width"] * manifest["chunks"][0]["sent_height"] <= 800_000
+
+
 def test_long_chunk_image_path_uses_traceable_filename(tmp_path):
     image_path = tmp_path / "long_trace.jpg"
     Image.new("RGB", (1500, 5000), "white").save(image_path)
