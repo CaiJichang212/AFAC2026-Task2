@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import csv
+import subprocess
+import sys
 from pathlib import Path
 
 from PIL import Image
@@ -64,3 +66,18 @@ def test_write_profile_outputs_creates_csvs(tmp_path: Path):
     summary_rows = list(csv.DictReader(summary_csv.open(encoding="utf-8")))
     assert len(profile_rows) == 2
     assert summary_rows[0]["subset"] == "long"
+
+
+def test_profile_train_script_help_runs_from_repo_root():
+    script = Path("scripts/chunk_eval/profile_train.py")
+
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        cwd=Path.cwd(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "Profile AFAC Task2 train images" in result.stdout

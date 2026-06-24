@@ -30,3 +30,20 @@ python -m finix_restore.local_eval \
 - `提交CSV` 必须是本次实验实际生成并回读通过的文件。
 - `评估JSON` 必须由 `finix_restore.local_eval` 生成。
 - `主要观察` 记录可执行结论，例如接缝重复、表格错列、API 超时比例，而不是泛泛描述。
+
+## 2026-06-23 训练集切图评估
+
+- 设计文档：`docs/superpowers/specs/2026-06-23-chunking-evaluation-design.md`
+- 实施计划：`docs/superpowers/plans/2026-06-23-chunking-evaluation-execution.md`
+- 最终报告：`outputs/chunk_eval/final_report.md`
+- 关键产物：`outputs/chunk_eval/s0_profile/train_profile.csv`、`outputs/chunk_eval/s1_dry_run/summary.csv`、`outputs/chunk_eval/s2_api_ablation/s2_metrics_summary_fresh.md`
+- 当前结论：全量 dry-run 支持 `balanced_6m` 作为下一阶段 table 基线；API partial 显示 table HTML 结构稳定性和表格合并仍是进入全量训练集评分前的 P0 风险。
+
+## 2026-06-23 A榜 balanced_6m 全量预测
+
+- 输入目录：`data/AFAC A榜评测数据集/finix_huge_long_rest_A/images`、`data/AFAC A榜评测数据集/finix_huge_table_rest_A/images`
+- 配置文件：`scripts/chunk_eval/configs/balanced_6m.yaml`
+- work_dir：`outputs/a_eval/balanced_6m_full`
+- 提交 CSV：`outputs/a_eval/balanced_6m_full/submission_A_balanced_6m_from_merged.csv`
+- 风险清单：`outputs/a_eval/balanced_6m_full/risk_summary.md`
+- 主要观察：A榜 100 张均生成 merged；CLI 因质量门未直接写 CSV，原因是 table 样本存在 `html_broken` 和 `high_duplication` 风险；最终提交 CSV 从 merged 结果组装，并通过列名、行数、空输出和重复文件名校验。
