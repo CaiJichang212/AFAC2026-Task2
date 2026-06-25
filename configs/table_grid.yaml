@@ -1,6 +1,0 @@
-chunk:
-  table:
-    target_pixels: 4000000
-    full_page_max_pixels: 8000000
-    horizontal_overlap: 160
-    vertical_overlap: 220
