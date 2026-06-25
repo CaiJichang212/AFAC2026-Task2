@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 from PIL import Image
 
@@ -44,6 +46,14 @@ def _table_html(col_band: int) -> str:
     return f"<table>{''.join(rows)}</table>"
 
 
+def _long_table_fragment(title: str, value: str) -> str:
+    rows = [
+        "<tr><td>责任</td><td>说明</td></tr>",
+        f"<tr><td>{title}</td><td>{value}</td></tr>",
+    ]
+    return f"<table>{''.join(rows)}</table>"
+
+
 def test_pipeline_assembles_split_table_chunks_into_single_rows(tmp_path, monkeypatch):
     from finix_restore.models import ChunkText
     from finix_restore.pipeline import Pipeline
@@ -74,3 +84,44 @@ def test_pipeline_assembles_split_table_chunks_into_single_rows(tmp_path, monkey
 
     assert report.passed
     assert "<td>终身</td><td>1</td><td>男</td><td>2176</td>" in df.loc[0, "ground_truth"]
+
+
+def test_pipeline_long_route_merges_table_fragments_and_records_metrics(tmp_path, monkeypatch):
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline
+
+    class LongTableClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse_chunks(self, chunks, force_api=False):
+            payloads = []
+            for chunk in chunks:
+                if chunk.row == 0:
+                    markdown = ("A" * 1100) + "\n" + _long_table_fragment("住院", "给付")
+                else:
+                    markdown = _long_table_fragment("门诊", "给付") + "\n" + ("B" * 1100)
+                payloads.append(
+                    ChunkText(
+                        chunk=chunk,
+                        markdown=markdown,
+                        block_type="body",
+                        source="api",
+                    )
+                )
+            return payloads, 0
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (300, 6000), "white").save(input_dir / "long.png")
+    config = _config(tmp_path, [input_dir], tmp_path / "submission.csv")
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", LongTableClient)
+
+    report = Pipeline(config).run()
+    df = pd.read_csv(config.output_csv)
+
+    assert report.passed
+    assert df.loc[0, "ground_truth"].count("<table") == 1
+    qc = json.loads((config.paths.qc_dir / "long.json").read_text(encoding="utf-8"))
+    assert qc["metrics"]["long_merged_tables"] == 1
+    assert qc["metrics"]["long_removed_table_fragments"] == 1

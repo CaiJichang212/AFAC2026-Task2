@@ -251,6 +251,27 @@ def test_long_cut_adjusts_to_horizontal_blank_band(tmp_path):
     assert chunks[0].cut_source == "blank_band"
 
 
+def test_long_chunker_marks_blank_band_cut_when_hint_near_target(tmp_path):
+    image_path = tmp_path / "long_cut_hint.jpg"
+    Image.new("RGB", (1500, 12000), "white").save(image_path)
+    profile = _profile(image_path, 1500, 12000, "long_strip")
+    hints = LayoutHints((0, 0, 1500, 12000), [(3920, 4080), (7920, 8080)], [], 0.0, 1)
+    cfg = ChunkConfig.from_mapping({
+        "long": {
+            "target_pixels": 6_000_000,
+            "safe_max_pixels": 8_000_000,
+            "max_window_height": 4000,
+            "min_window_height": 1800,
+            "vertical_overlap": 320,
+            "blank_band_search_px": 360,
+        }
+    })
+
+    chunks = LongStripChunker(tmp_path / "chunks", config=cfg).chunk(profile, hints)
+
+    assert any(chunk.cut_source == "blank_band" for chunk in chunks if not chunk.is_last_row)
+
+
 def test_long_cutline_planner_prefers_blank_band_and_falls_back_to_fixed_cut():
     from finix_restore.cutline_planner import LongCutlinePlanner
 

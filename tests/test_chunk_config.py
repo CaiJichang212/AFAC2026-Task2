@@ -57,6 +57,10 @@ def test_default_values_for_hard_max_and_min_pixels():
     assert cfg.long.min_window_height == 1800
     assert cfg.long.vertical_overlap == 320
     assert cfg.long.blank_band_search_px == 360
+    assert cfg.long.blank_band_thumb_width == 256
+    assert cfg.long.blank_band_max_thumb_height == 40_000
+    assert cfg.long.blank_band_density_threshold == 0.006
+    assert cfg.long.blank_band_min_height_px == 50
 
     assert cfg.table.target_pixels == 6_000_000
     assert cfg.table.safe_max_pixels == 8_000_000
@@ -103,3 +107,21 @@ def test_legacy_flat_key_lookup_via_get_for_backwards_compat():
     assert cfg.get("table_horizontal_overlap") == 160
     assert cfg.get("table_vertical_overlap") == 220
     assert cfg.get("does_not_exist", 7) == 7
+
+
+def test_nested_long_blank_band_keys_are_loaded():
+    cfg = ChunkConfig.from_mapping(
+        {
+            "long": {
+                "blank_band_thumb_width": 320,
+                "blank_band_max_thumb_height": 20_000,
+                "blank_band_density_threshold": 0.01,
+                "blank_band_min_height_px": 64,
+            }
+        }
+    )
+
+    assert cfg.long.blank_band_thumb_width == 320
+    assert cfg.long.blank_band_max_thumb_height == 20_000
+    assert cfg.long.blank_band_density_threshold == 0.01
+    assert cfg.long.blank_band_min_height_px == 64

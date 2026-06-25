@@ -93,3 +93,29 @@ def test_normalizer_strips_fence_embedded_between_table_chunks():
     assert "<tr><td>a</td></tr>" in normalized
     assert "<tr><td>b</td></tr>" in normalized
 
+
+def test_normalizer_removes_bold_marker_from_article_prefix_only():
+    raw = (
+        "**第一条** 本保险合同由保险条款组成。\n"
+        "赔付比例为100%。\n"
+        "备案号：C00000232522022021915133\n"
+        "日期：2026年6月24日"
+    )
+
+    normalized = MarkdownNormalizer().normalize(raw)
+
+    assert normalized.startswith("第一条 本保险合同由保险条款组成。\n")
+    assert "100%" in normalized
+    assert "C00000232522022021915133" in normalized
+    assert "2026年6月24日" in normalized
+
+
+def test_normalizer_promotes_numbered_list_title_in_toc_context():
+    raw = "# 条款目录\n\n* 1. 总则\n* 1.1 合同构成\n\n- 1. 没有指定受益人"
+
+    normalized = MarkdownNormalizer().normalize(raw)
+    lines = normalized.splitlines()
+
+    assert "## 1. 总则" in lines
+    assert "### 1.1 合同构成" in lines
+    assert "- 1. 没有指定受益人" in lines

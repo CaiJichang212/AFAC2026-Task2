@@ -61,3 +61,39 @@ def test_unclosed_sentence_continues_without_blank_paragraph():
 
     assert "保险责任（包括住院医疗）和门诊责任。" in merged.markdown
     assert "包括\n\n住院" not in merged.markdown
+
+
+def test_block_level_overlap_removes_fuzzy_duplicate_heading_once():
+    from finix_restore.dedup import DedupMerger
+
+    first = _chunk_text("a", "## 2.3 等待期", (0, 0, 100, 100), {"bottom": 20})
+    second = _chunk_text("b", "## 2.3等待期\n正文", (0, 80, 100, 180), {"top": 20})
+
+    merged = DedupMerger().merge([first, second])
+
+    assert merged.markdown.count("等待期") == 1
+    assert "正文" in merged.markdown
+
+
+def test_block_level_overlap_keeps_table_fragments_for_long_merger():
+    from finix_restore.dedup import DedupMerger
+
+    first = _chunk_text(
+        "a",
+        "等待期说明\n\n<table><tr><td>A</td></tr></table>",
+        (0, 0, 100, 120),
+        {"bottom": 20},
+    )
+    second = _chunk_text(
+        "b",
+        "等待期说明\n\n<table><tr><td>B</td></tr></table>",
+        (0, 100, 100, 220),
+        {"top": 20},
+    )
+
+    merged = DedupMerger().merge([first, second])
+
+    assert merged.markdown.count("等待期说明") == 1
+    assert "<td>A</td>" in merged.markdown
+    assert "<td>B</td>" in merged.markdown
+    assert merged.markdown.count("<table") == 2

@@ -1,5 +1,6 @@
 from PIL import Image, ImageDraw
 
+from finix_restore.chunk_config import ChunkConfig, LongChunkConfig
 from finix_restore.layout_sentry import LayoutSentry, map_band_to_original
 
 
@@ -29,5 +30,30 @@ def test_layout_sentry_returns_empty_hints_for_low_contrast(tmp_path):
     hints = LayoutSentry(max_thumb_size=200).analyze(image_path)
 
     assert hints.horizontal_blank_bands == []
+    assert hints.vertical_blank_bands == []
+    assert hints.column_count == 1
+
+
+def test_layout_sentry_uses_long_detector_for_extreme_aspect_image(tmp_path):
+    image_path = tmp_path / "long.png"
+    img = Image.new("L", (300, 6000), 255)
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((20, 0, 280, 2399), fill=0)
+    draw.rectangle((20, 3600, 280, 5999), fill=0)
+    img.convert("RGB").save(image_path)
+
+    hints = LayoutSentry(max_thumb_size=1200).analyze(
+        image_path,
+        chunk_config=ChunkConfig(
+            long=LongChunkConfig(
+                blank_band_thumb_width=256,
+                blank_band_max_thumb_height=40_000,
+                blank_band_density_threshold=0.006,
+                blank_band_min_height_px=50,
+            )
+        ),
+    )
+
+    assert any(start <= 3000 <= end for start, end in hints.horizontal_blank_bands)
     assert hints.vertical_blank_bands == []
     assert hints.column_count == 1

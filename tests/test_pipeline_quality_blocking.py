@@ -5,6 +5,7 @@ import pytest
 from PIL import Image
 
 from finix_restore.config import RunConfig
+from finix_restore.models import Chunk, ImageProfile
 from finix_restore.paths import RunPaths
 
 
@@ -251,3 +252,71 @@ def test_pipeline_resume_hits_merged_cache_still_records_qc_metric(tmp_path):
     assert report.passed
     qc = json.loads((config.paths.qc_dir / "cached.json").read_text(encoding="utf-8"))
     assert qc["metrics"]["from_merged_cache"] == 1
+
+
+def test_dry_run_qc_records_long_cutline_metrics(tmp_path):
+    from finix_restore.pipeline import Pipeline
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    image_path = input_dir / "long.png"
+    Image.new("RGB", (300, 6000), "white").save(image_path)
+    config = _config(tmp_path, [input_dir], tmp_path / "submission.csv", dry_run=True)
+    pipeline = Pipeline(config)
+    profile = ImageProfile(
+        file_name="long.png",
+        path=image_path,
+        width=300,
+        height=6000,
+        pixels=1_800_000,
+        aspect=20.0,
+        doc_type="long_strip",
+        risk_level="low",
+    )
+    chunks = [
+        Chunk(
+            chunk_id="c1",
+            file_name="long.png",
+            image_path=image_path,
+            bbox=(0, 0, 300, 2200),
+            row=0,
+            col=0,
+            overlap={"top": 0, "bottom": 320, "left": 0, "right": 0},
+            image_sha1="sha1",
+            chunk_pixels=660_000,
+            cut_source="blank_band",
+        ),
+        Chunk(
+            chunk_id="c2",
+            file_name="long.png",
+            image_path=image_path,
+            bbox=(0, 1880, 300, 4200),
+            row=1,
+            col=0,
+            overlap={"top": 320, "bottom": 320, "left": 0, "right": 0},
+            image_sha1="sha1",
+            chunk_pixels=696_000,
+            cut_source="fixed_cut",
+        ),
+        Chunk(
+            chunk_id="c3",
+            file_name="long.png",
+            image_path=image_path,
+            bbox=(0, 3880, 300, 6000),
+            row=2,
+            col=0,
+            overlap={"top": 320, "bottom": 0, "left": 0, "right": 0},
+            image_sha1="sha1",
+            chunk_pixels=636_000,
+            is_last_row=True,
+            is_last_col=True,
+            cut_source="fixed_cut",
+        ),
+    ]
+
+    pipeline._write_dry_run_qc(profile, chunks)
+
+    qc = json.loads((config.paths.qc_dir / "long.json").read_text(encoding="utf-8"))
+    assert qc["metrics"]["blank_cut_count"] == 1
+    assert qc["metrics"]["fixed_cut_count"] == 1
+    assert qc["metrics"]["blank_cut_ratio"] == 0.5
