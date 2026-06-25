@@ -97,3 +97,12 @@ python scripts/chunk_eval/validate_submission.py \
 - 提交 CSV：`outputs/a_eval/balanced_6m_full/submission_A_balanced_6m_from_merged.csv`
 - 风险清单：`outputs/a_eval/balanced_6m_full/risk_summary.md`
 - 主要观察：A榜 100 张均生成 merged；CLI 因质量门未直接写 CSV，原因是 table 样本存在 `html_broken` 和 `high_duplication` 风险；最终提交 CSV 从 merged 结果组装，并通过列名、行数、空输出和重复文件名校验。
+
+## 2026-06-24 结构优化后真实数据验证总结
+
+- 汇总文档：`docs/阶段性实验背景总结-20260624.md`
+- 全量训练集输出目录：`outputs/chunk_eval/full_train_balanced_6m_20260624`
+- 主要结论：
+  - `long` 全量 100 张 `Overall = 64.3452`，表现稳定，主问题仍是 `Read Order Edit`
+  - `table` 全量 100 张 `Overall = 0.8901`，主问题仍是 `Table TEDS` 极低与 `html_broken`
+  - `table` 路径再次出现“逐文件产物完成但 CLI 收尾卡住”的稳定性问题，最终通过 `merged` 兜底生成 CSV 并评分
