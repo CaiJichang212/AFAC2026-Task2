@@ -16,6 +16,10 @@ chunk:
     min_window_height: 1800
     vertical_overlap: 320
     blank_band_search_px: 360
+    blank_band_thumb_width: 256
+    blank_band_max_thumb_height: 40000
+    blank_band_density_threshold: 0.006
+    blank_band_min_height_px: 50
   table:
     target_pixels: 5000000
     safe_max_pixels: 7000000

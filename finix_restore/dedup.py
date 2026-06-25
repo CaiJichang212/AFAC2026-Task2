@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import re
 from difflib import SequenceMatcher
 from typing import Sequence
 
-from finix_restore.block_segments import BlockSegmenter
+from finix_restore.block_segments import BlockSegment, BlockSegmenter
 from finix_restore.models import Chunk, ChunkText, MergeResult
 
 
@@ -34,12 +35,19 @@ class DedupMerger:
         for current in ordered_chunks[1:]:
             current_text = current.markdown.strip()
             overlap_len = 0
+            removed_blocks = 0
             if self._can_dedup(previous, current):
                 overlap_len = self._find_prefix_suffix_overlap(merged, current_text, current.block_type)
+            if overlap_len == 0 and self._chunks_overlap(previous.chunk, current.chunk):
+                current_text, removed_blocks = self._trim_block_overlap(previous.markdown, current_text)
 
             if overlap_len > 0:
                 removed_ranges.append((current.chunk.chunk_id, 0, overlap_len))
                 merged = self._append_after_overlap(merged, current_text[overlap_len:])
+            elif removed_blocks > 0:
+                removed_ranges.extend((current.chunk.chunk_id, 0, 0) for _ in range(removed_blocks))
+                if current_text:
+                    merged = self._append_paragraph(merged, current_text)
             elif self._should_continue_without_blank(merged):
                 merged = merged.rstrip() + current_text.lstrip()
             else:
@@ -108,6 +116,61 @@ class DedupMerger:
         if not text:
             return merged.rstrip()
         return merged.rstrip() + "\n\n" + text.lstrip()
+
+    def _trim_block_overlap(self, previous_text: str, current_text: str) -> tuple[str, int]:
+        previous_blocks = self._logical_blocks(previous_text)[-3:]
+        current_blocks = self._logical_blocks(current_text)
+        if not previous_blocks or not current_blocks:
+            return current_text, 0
+
+        previous_candidates = [block for block in previous_blocks if block.block_type not in _PROTECTED_BLOCKS]
+        current_candidates = [block for block in current_blocks[:3] if block.block_type not in _PROTECTED_BLOCKS]
+        max_match = min(len(previous_candidates), len(current_candidates))
+        if max_match == 0:
+            return current_text, 0
+
+        for size in range(max_match, 0, -1):
+            tail = previous_candidates[-size:]
+            head = current_candidates[:size]
+            if all(self._blocks_match(left.text, right.text) for left, right in zip(tail, head)):
+                rebuilt = self._rebuild_after_removing_nonprotected_prefix(current_blocks, size)
+                return rebuilt, size
+        return current_text, 0
+
+    def _rebuild_after_removing_nonprotected_prefix(self, blocks, count: int) -> str:
+        remaining: list[str] = []
+        removed = 0
+        for block in blocks:
+            if removed < count and block.block_type not in _PROTECTED_BLOCKS:
+                removed += 1
+                continue
+            remaining.append(block.text)
+        return "\n\n".join(part for part in remaining if part.strip())
+
+    def _blocks_match(self, left: str, right: str) -> bool:
+        left_norm = self._normalize_block_text(left)
+        right_norm = self._normalize_block_text(right)
+        if not left_norm or not right_norm:
+            return False
+        if left_norm == right_norm:
+            return True
+        return SequenceMatcher(None, left_norm, right_norm).ratio() >= self.similarity_threshold
+
+    def _normalize_block_text(self, text: str) -> str:
+        return re.sub(r"\s+", "", text).lower()
+
+    def _logical_blocks(self, markdown: str) -> list[BlockSegment]:
+        logical: list[BlockSegment] = []
+        for block in self.segmenter.segment(markdown):
+            lines = [line.strip() for line in block.text.splitlines() if line.strip()]
+            if block.block_type == "title" and len(lines) > 1:
+                logical.append(BlockSegment(block_type="title", text=lines[0]))
+                remainder = "\n".join(lines[1:]).strip()
+                if remainder:
+                    logical.append(BlockSegment(block_type="paragraph", text=remainder))
+                continue
+            logical.append(block)
+        return logical
 
     def _should_continue_without_blank(self, text: str) -> bool:
         tail = text.rstrip()

@@ -12,6 +12,10 @@ class LongChunkConfig:
     min_window_height: int = 1800
     vertical_overlap: int = 320
     blank_band_search_px: int = 360
+    blank_band_thumb_width: int = 256
+    blank_band_max_thumb_height: int = 40_000
+    blank_band_density_threshold: float = 0.006
+    blank_band_min_height_px: int = 50
 
 
 @dataclass(frozen=True)

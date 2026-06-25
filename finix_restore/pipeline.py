@@ -15,6 +15,7 @@ from finix_restore.config import RunConfig
 from finix_restore.dedup import DedupMerger
 from finix_restore.finix_api import FinixApiClient
 from finix_restore.layout_sentry import LayoutSentry
+from finix_restore.long_merger import LongStripMerger
 from finix_restore.models import Chunk, ChunkText, ImageProfile, LayoutHints, ProcessedFile, QualityReport
 from finix_restore.normalizer import MarkdownNormalizer
 from finix_restore.profiler import ImageProfiler
@@ -43,6 +44,7 @@ class Pipeline:
             window_chars_table=int(config.merge.get("dedup_window_chars_table", 600)),
             similarity_threshold=float(config.merge.get("dedup_similarity_threshold", 0.88)),
         )
+        self.long_merger = LongStripMerger(dedup=self.dedup)
         self.table_merger = TableMerger()
         self.table_assembler = TableRowAssembler()
         self.quality_gate = QualityGate(
@@ -121,7 +123,7 @@ class Pipeline:
                 rerun_count=0,
             )
 
-        hints = self.layout_sentry.analyze(image_path)
+        hints = self.layout_sentry.analyze(image_path, chunk_config=self.config.chunk)
         chunks = self._chunk(profile, hints)
 
         if self.config.dry_run:
@@ -181,7 +183,7 @@ class Pipeline:
         normalized = self.normalizer.batch(chunk_texts)
         self._write_normalized(profile.file_name, normalized)
         ordered = self.order_resolver.resolve(normalized, doc_type=profile.doc_type)
-        extra_metrics: dict[str, float | int | str] = {}
+        extra_metrics: dict[str, float | int | str] = self._long_cutline_metrics(chunks, profile.doc_type)
         if profile.doc_type == "table_page":
             assembled = self.table_assembler.assemble(ordered)
             repaired = self.table_merger.repair(assembled.markdown)
@@ -189,6 +191,15 @@ class Pipeline:
             extra_metrics["table_assembly_warning_count"] = len(assembled.warnings)
             if assembled.warnings:
                 extra_metrics["table_assembly_warnings"] = ",".join(assembled.warnings)
+        elif profile.doc_type == "long_strip":
+            merged = self.long_merger.merge(ordered)
+            repaired = self.table_merger.repair(merged.markdown)
+            extra_metrics["long_merged_tables"] = merged.merged_tables
+            extra_metrics["long_removed_table_fragments"] = merged.removed_table_fragments
+            extra_metrics["long_merge_warning_count"] = len(merged.warnings)
+            extra_metrics["long_removed_text_blocks"] = merged.removed_text_blocks
+            if merged.warnings:
+                extra_metrics["long_merge_warnings"] = ",".join(merged.warnings)
         else:
             merged = self.dedup.merge(ordered)
             repaired = self.table_merger.repair(merged.markdown)
@@ -282,23 +293,51 @@ class Pipeline:
         max_chunk_pixels = max((c.chunk_pixels for c in chunks), default=0)
         over_safe = sum(1 for c in chunks if "over_safe_pixels" in c.risk_flags)
         over_hard = sum(1 for c in chunks if c.chunk_pixels > self.config.chunk.hard_max_pixels)
+        metrics = {
+            "doc_type": profile.doc_type,
+            "chunks": len(chunks),
+            "dry_run": True,
+            "chunk_policy": chunk_policy,
+            "max_chunk_pixels": max_chunk_pixels,
+            "over_safe_chunks": over_safe,
+            "over_hard_chunks": over_hard,
+        }
+        metrics.update(self._long_cutline_metrics(chunks, profile.doc_type))
         payload = {
             "passed": True,
             "risks": [],
-            "metrics": {
-                "doc_type": profile.doc_type,
-                "chunks": len(chunks),
-                "dry_run": True,
-                "chunk_policy": chunk_policy,
-                "max_chunk_pixels": max_chunk_pixels,
-                "over_safe_chunks": over_safe,
-                "over_hard_chunks": over_hard,
-            },
+            "metrics": metrics,
         }
         (self.config.paths.qc_dir / f"{Path(profile.file_name).stem}.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    def _long_cutline_metrics(
+        self,
+        chunks: Sequence[Chunk],
+        doc_type: str,
+    ) -> dict[str, float | int]:
+        if doc_type != "long_strip":
+            return {}
+
+        blank_cut_count = 0
+        fixed_cut_count = 0
+        last_index = len(chunks) - 1
+        for index, chunk in enumerate(chunks):
+            if index == last_index or chunk.is_last_row:
+                continue
+            if chunk.cut_source == "blank_band":
+                blank_cut_count += 1
+            else:
+                fixed_cut_count += 1
+
+        total = blank_cut_count + fixed_cut_count
+        return {
+            "blank_cut_count": blank_cut_count,
+            "fixed_cut_count": fixed_cut_count,
+            "blank_cut_ratio": blank_cut_count / max(1, total),
+        }
 
     def _write_config_snapshot(self) -> None:
         self.config.paths.logs_dir.mkdir(parents=True, exist_ok=True)

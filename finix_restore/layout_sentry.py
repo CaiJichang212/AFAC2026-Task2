@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageStat
 
+from finix_restore.chunk_config import ChunkConfig
+from finix_restore.long_layout import LongBlankBandDetector
 from finix_restore.models import LayoutHints
 
 
@@ -31,12 +33,29 @@ def _bands_from_projection(projection: np.ndarray, threshold: float, min_len: in
 
 
 class LayoutSentry:
-    def __init__(self, max_thumb_size: int = 1200) -> None:
+    def __init__(
+        self,
+        max_thumb_size: int = 1200,
+        long_detector: LongBlankBandDetector | None = None,
+    ) -> None:
         self.max_thumb_size = max_thumb_size
+        self.long_detector = long_detector or LongBlankBandDetector()
 
-    def analyze(self, image_path: Path) -> LayoutHints:
+    def analyze(self, image_path: Path, chunk_config: ChunkConfig | None = None) -> LayoutHints:
+        chunk_config = chunk_config or ChunkConfig()
         with Image.open(image_path) as img:
             width, height = img.size
+        if _is_long_strip_shape(width, height):
+            detection = self.long_detector.detect(image_path, chunk_config.long)
+            return LayoutHints(
+                crop_box=detection.crop_box,
+                horizontal_blank_bands=detection.horizontal_blank_bands,
+                vertical_blank_bands=[],
+                table_line_density=0.0,
+                column_count=1,
+            )
+
+        with Image.open(image_path) as img:
             gray = img.convert("L")
             if max(width, height) > self.max_thumb_size:
                 scale = self.max_thumb_size / max(width, height)
@@ -75,3 +94,7 @@ class LayoutSentry:
         column_count = 2 if len(v_bands) >= 1 and dense_cols.mean() > 0.05 else 1
         line_density = float((row_density > 0.35).mean() + (col_density > 0.35).mean()) / 2.0
         return LayoutHints(crop_box, h_bands, v_bands, line_density, column_count)
+
+
+def _is_long_strip_shape(width: int, height: int) -> bool:
+    return height >= 30_000 or (height / max(1, width)) >= 10
