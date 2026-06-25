@@ -10,3 +10,4 @@ pytest
 ruff
 apted
 rapidfuzz
+tqdm

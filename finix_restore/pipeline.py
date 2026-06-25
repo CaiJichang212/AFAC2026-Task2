@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 import yaml
+from tqdm import tqdm
 
 from finix_restore.chunkers import LongStripChunker, PageChunker, TableGridChunker
 from finix_restore.concurrency import ApiConcurrencyLimiter
@@ -73,7 +74,7 @@ class Pipeline:
         rows: list[dict[str, str] | None] = [None] * len(image_paths)
 
         if image_concurrency <= 1:
-            for index, image_path in enumerate(image_paths):
+            for index, image_path in enumerate(tqdm(image_paths, desc="Processing images")):
                 processed = self._process_image(image_path)
                 processed_files[index] = processed
                 rows[index] = {"file_name": image_path.name, "ground_truth": processed.markdown}
@@ -83,12 +84,14 @@ class Pipeline:
                     executor.submit(self._process_image, image_path): index
                     for index, image_path in enumerate(image_paths)
                 }
-                for future in as_completed(future_to_index):
-                    index = future_to_index[future]
-                    image_path = image_paths[index]
-                    processed = future.result()
-                    processed_files[index] = processed
-                    rows[index] = {"file_name": image_path.name, "ground_truth": processed.markdown}
+                with tqdm(total=len(future_to_index), desc="Processing images") as pbar:
+                    for future in as_completed(future_to_index):
+                        index = future_to_index[future]
+                        image_path = image_paths[index]
+                        processed = future.result()
+                        processed_files[index] = processed
+                        rows[index] = {"file_name": image_path.name, "ground_truth": processed.markdown}
+                        pbar.update(1)
 
         if any(item is None for item in processed_files) or any(item is None for item in rows):
             raise PipelineError("internal error: incomplete parallel image results")
