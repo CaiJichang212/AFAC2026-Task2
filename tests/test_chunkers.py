@@ -272,6 +272,102 @@ def test_long_chunker_marks_blank_band_cut_when_hint_near_target(tmp_path):
     assert any(chunk.cut_source == "blank_band" for chunk in chunks if not chunk.is_last_row)
 
 
+def test_long_chunker_uses_quality_band_when_configured(tmp_path):
+    image_path = tmp_path / "long_quality.jpg"
+    Image.new("RGB", (1500, 10000), "white").save(image_path)
+    profile = _profile(image_path, 1500, 10000, "long_strip")
+    # 紧贴 target_y=4000 的窄白带(8px)，以及略远但宽的优质白带(200px)。
+    hints = LayoutHints((0, 0, 1500, 10000), [(3996, 4004), (4180, 4380)], [], 0.0, 1)
+    base_long_cfg = {
+        "target_pixels": 6_000_000,
+        "safe_max_pixels": 8_000_000,
+        "max_window_height": 4000,
+        "min_window_height": 1800,
+        "vertical_overlap": 320,
+        "blank_band_search_px": 360,
+    }
+
+    default_chunks = LongStripChunker(
+        tmp_path / "chunks_default", config=ChunkConfig.from_mapping({"long": base_long_cfg})
+    ).chunk(profile, hints)
+    quality_chunks = LongStripChunker(
+        tmp_path / "chunks_quality",
+        config=ChunkConfig.from_mapping(
+            {"long": {**base_long_cfg, "blank_band_min_quality_height_px": 100}}
+        ),
+    ).chunk(profile, hints)
+
+    assert default_chunks[0].bbox[3] == 4000
+    assert quality_chunks[0].bbox[3] == 4280
+    assert quality_chunks[0].cut_source == "blank_band"
+
+
+def test_long_cutline_planner_quality_search_extends_range_for_quality_only():
+    from finix_restore.cutline_planner import LongCutlinePlanner
+
+    planner = LongCutlinePlanner()
+    # 紧贴 target 的窄白带在 search_px 内；优质白带在扩展 quality_search_px 内。
+    bands = [(3196, 3204), (3800, 4000)]
+
+    near = planner.choose_cut(target_y=3200, y0=0, cy1=8000, bands=bands, search_px=200)
+    assert near.y1 == 3200
+
+    quality = planner.choose_cut(
+        target_y=3200,
+        y0=0,
+        cy1=8000,
+        bands=bands,
+        search_px=200,
+        min_quality_height_px=120,
+        quality_search_px=800,
+    )
+    assert quality.y1 == 3900
+    assert quality.source == "blank_band"
+
+
+def test_long_cutline_planner_quality_search_does_not_widen_fallback():
+    from finix_restore.cutline_planner import LongCutlinePlanner
+
+    planner = LongCutlinePlanner()
+    # 仅在扩展范围内存在窄白带，未达到 quality 阈值时应回退到 fixed_cut。
+    bands = [(3800, 3820)]
+
+    cut = planner.choose_cut(
+        target_y=3200,
+        y0=0,
+        cy1=8000,
+        bands=bands,
+        search_px=200,
+        min_quality_height_px=120,
+        quality_search_px=800,
+    )
+    assert cut.y1 == 3200
+    assert cut.source == "fixed_cut"
+
+
+def test_long_cutline_planner_prefers_quality_band_over_nearest_when_enabled():
+    from finix_restore.cutline_planner import LongCutlinePlanner
+
+    planner = LongCutlinePlanner()
+    # 距离更近但很窄(高度=10)；距离稍远但更宽(高度=200)；均在 search_px 内。
+    bands = [(3195, 3205), (3490, 3690)]
+
+    near = planner.choose_cut(target_y=3200, y0=0, cy1=8000, bands=bands, search_px=500)
+    assert near.y1 == 3200
+    assert near.source == "blank_band"
+
+    quality = planner.choose_cut(
+        target_y=3200,
+        y0=0,
+        cy1=8000,
+        bands=bands,
+        search_px=500,
+        min_quality_height_px=120,
+    )
+    assert quality.y1 == 3590
+    assert quality.source == "blank_band"
+
+
 def test_long_cutline_planner_prefers_blank_band_and_falls_back_to_fixed_cut():
     from finix_restore.cutline_planner import LongCutlinePlanner
 

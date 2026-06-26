@@ -123,6 +123,8 @@ class LongStripChunker:
                 cy1=cy1,
                 bands=hints.horizontal_blank_bands,
                 search_px=long_cfg.blank_band_search_px,
+                min_quality_height_px=long_cfg.blank_band_min_quality_height_px,
+                quality_search_px=long_cfg.blank_band_quality_search_px,
             )
             y1 = cut.y1
             cut_source = cut.source

@@ -35,20 +35,17 @@ class DedupMerger:
         for current in ordered_chunks[1:]:
             current_text = current.markdown.strip()
             overlap_len = 0
-            removed_units = 0
-            if self._chunks_overlap(previous.chunk, current.chunk):
-                if self._can_dedup(previous, current):
-                    current_text, removed_units = self._trim_line_overlap(previous.markdown, current_text)
-                if removed_units == 0:
-                    current_text, removed_units = self._trim_block_overlap(previous.markdown, current_text)
-                if removed_units == 0 and self._can_dedup(previous, current):
-                    overlap_len = self._find_prefix_suffix_overlap(merged, current_text, current.block_type)
+            removed_blocks = 0
+            if self._can_dedup(previous, current):
+                overlap_len = self._find_prefix_suffix_overlap(merged, current_text, current.block_type)
+            if overlap_len == 0 and self._chunks_overlap(previous.chunk, current.chunk):
+                current_text, removed_blocks = self._trim_block_overlap(previous.markdown, current_text)
 
             if overlap_len > 0:
                 removed_ranges.append((current.chunk.chunk_id, 0, overlap_len))
                 merged = self._append_after_overlap(merged, current_text[overlap_len:])
-            elif removed_units > 0:
-                removed_ranges.extend((current.chunk.chunk_id, 0, 0) for _ in range(removed_units))
+            elif removed_blocks > 0:
+                removed_ranges.extend((current.chunk.chunk_id, 0, 0) for _ in range(removed_blocks))
                 if current_text:
                     merged = self._append_paragraph(merged, current_text)
             elif self._should_continue_without_blank(merged):
@@ -120,30 +117,6 @@ class DedupMerger:
             return merged.rstrip()
         return merged.rstrip() + "\n\n" + text.lstrip()
 
-    def _trim_line_overlap(self, previous_text: str, current_text: str) -> tuple[str, int]:
-        previous_lines = [line for line in previous_text.splitlines() if line.strip()]
-        current_lines = [line for line in current_text.splitlines() if line.strip()]
-        if not previous_lines or not current_lines:
-            return current_text, 0
-
-        max_match = min(8, len(previous_lines), len(current_lines))
-        for size in range(max_match, 0, -1):
-            tail = previous_lines[-size:]
-            head = current_lines[:size]
-            if all(self._blocks_match(left, right) for left, right in zip(tail, head)):
-                return self._remove_nonempty_prefix_lines(current_text, size), size
-        return current_text, 0
-
-    def _remove_nonempty_prefix_lines(self, text: str, count: int) -> str:
-        kept: list[str] = []
-        removed = 0
-        for line in text.splitlines():
-            if removed < count and line.strip():
-                removed += 1
-                continue
-            kept.append(line)
-        return "\n".join(kept).strip()
-
     def _trim_block_overlap(self, previous_text: str, current_text: str) -> tuple[str, int]:
         previous_blocks = self._logical_blocks(previous_text)[-3:]
         current_blocks = self._logical_blocks(current_text)
@@ -184,10 +157,7 @@ class DedupMerger:
         return SequenceMatcher(None, left_norm, right_norm).ratio() >= self.similarity_threshold
 
     def _normalize_block_text(self, text: str) -> str:
-        normalized = re.sub(r"<[^>]+>", "", text)
-        normalized = re.sub(r"^#{1,6}\s*", "", normalized.strip())
-        normalized = normalized.replace("（", "(").replace("）", ")")
-        return re.sub(r"\s+", "", normalized).lower()
+        return re.sub(r"\s+", "", text).lower()
 
     def _logical_blocks(self, markdown: str) -> list[BlockSegment]:
         logical: list[BlockSegment] = []

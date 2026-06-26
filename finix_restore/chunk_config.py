@@ -16,6 +16,12 @@ class LongChunkConfig:
     blank_band_max_thumb_height: int = 40_000
     blank_band_density_threshold: float = 0.006
     blank_band_min_height_px: int = 50
+    # 当 search 范围内存在“高质量”空白带（高度 >= min_quality_height_px）时优先选它；
+    # 否则回退原“距离最近”策略。0 表示禁用，保持向后兼容。
+    blank_band_min_quality_height_px: int = 0
+    # 仅当寻找“高质量”空白带时使用的扩展搜索范围；为 0 时复用 blank_band_search_px。
+    # 用于跳出表格内部的窄行间空白，定位真正的段落级空白。
+    blank_band_quality_search_px: int = 0
 
 
 @dataclass(frozen=True)

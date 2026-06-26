@@ -20,6 +20,8 @@ chunk:
     blank_band_max_thumb_height: 40000
     blank_band_density_threshold: 0.006
     blank_band_min_height_px: 50
+    blank_band_min_quality_height_px: 120
+    blank_band_quality_search_px: 700
   table:
     target_pixels: 6000000
     safe_max_pixels: 8000000

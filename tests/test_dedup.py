@@ -75,29 +75,6 @@ def test_block_level_overlap_removes_fuzzy_duplicate_heading_once():
     assert "正文" in merged.markdown
 
 
-def test_line_level_overlap_removes_heading_and_body_duplicate():
-    from finix_restore.dedup import DedupMerger
-
-    first = _chunk_text(
-        "a",
-        "前文\n\n受益人与被保险人在同一事件中死亡，且不能确定死亡先后顺序的，推定受益人死亡在先。\n\n### （二）意外残疾保险金受益人",
-        (0, 0, 100, 120),
-        {"bottom": 20},
-    )
-    second = _chunk_text(
-        "b",
-        "受益人与被保险人在同一事件中死亡，且不能确定死亡先后顺序的，推定受益人死亡在先。\n\n## (二) 意外残疾保险金受益人\n\n除另有约定外，本合同的意外残疾保险金的受益人为被保险人本人。",
-        (0, 100, 100, 220),
-        {"top": 20},
-    )
-
-    merged = DedupMerger().merge([first, second])
-
-    assert merged.markdown.count("受益人与被保险人") == 1
-    assert merged.markdown.count("意外残疾保险金受益人") == 1
-    assert "除另有约定外" in merged.markdown
-
-
 def test_block_level_overlap_keeps_table_fragments_for_long_merger():
     from finix_restore.dedup import DedupMerger
 
