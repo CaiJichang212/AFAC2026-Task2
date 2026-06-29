@@ -2,8 +2,8 @@ api:
   url: "${FINIX_API_URL}"
   timeout_seconds: 360
   max_retries: 3
-  concurrency: 4
-  per_user_concurrency: 1
+  concurrency: 15
+  per_user_concurrency: 3
 chunk:
   hard_max_pixels: 16777216
   safe_max_pixels: 12000000
@@ -16,9 +16,15 @@ chunk:
     min_window_height: 1800
     vertical_overlap: 320
     blank_band_search_px: 360
+    blank_band_thumb_width: 256
+    blank_band_max_thumb_height: 40000
+    blank_band_density_threshold: 0.006
+    blank_band_min_height_px: 50
+    blank_band_min_quality_height_px: 120
+    blank_band_quality_search_px: 700
   table:
-    target_pixels: 5000000
-    safe_max_pixels: 7000000
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
     full_page_max_pixels: 8000000
     horizontal_overlap: 160
     vertical_overlap: 220
@@ -35,4 +41,4 @@ quality:
   max_api_failure_ratio: 0.20
   max_reruns_per_file: 2
 runtime:
-  image_concurrency: 1
+  image_concurrency: 5
