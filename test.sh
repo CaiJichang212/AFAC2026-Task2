@@ -6,6 +6,14 @@
 #   --output_csv outputs/run_A_full/submission_A_full.csv \
 #   --config configs/default.yaml
 
+# 跑全部训练数据（100张）
+python -m finix_restore.cli \
+  --input_dir "data/AFAC 训练数据集/finixdocbench_huge_table_100/images" \
+  --work_dir outputs/table_train_run_1 \
+  --output_csv outputs/table_train_run_1/submission_A_table_train_run_1.csv \
+  --config configs/default.yaml \
+  > outputs/table_train_run_1.log 2>&1 &
+
 # 跑小批量评测数据（每个目录前2张）
 python -m finix_restore.cli \
   --input_dir "data/AFAC A榜评测数据集/finix_huge_long_rest_A/images" \
