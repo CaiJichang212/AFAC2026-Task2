@@ -25,6 +25,18 @@ def test_score_pair_with_table():
     assert r["overall"] == 100.0
 
 
+def test_score_pair_overall_clamps_negative_loss():
+    # pred far longer than gt -> text_edit/read_order_edit exceed 1.0 by design.
+    # overall must stay within [0, 100]; raw_overall preserves the unclamped value.
+    gt = "A"
+    pred = "A" + "X" * 500
+    r = score_pair("doc.png", pred, gt)
+    assert r["text_edit"] > 1.0
+    assert r["overall"] >= 0.0
+    assert r["overall"] <= 100.0
+    assert r["raw_overall"] < 0.0
+
+
 def _write_csv(path: Path, rows: list[tuple[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)

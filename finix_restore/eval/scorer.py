@@ -15,7 +15,12 @@ def score_pair(file_name: str, pred: str, gt: str) -> dict:
     roe = read_order_edit(pred, gt)
     has_table = teds is not None
     table_component = teds if has_table else 100.0
-    overall = ((1 - te) * 100 + table_component + (1 - roe) * 100) / 3
+    # te/roe 按赛题口径以 len(gt) 归一化，pred 远长于 gt 时可能 >1。
+    # 线上 overall 直接代入会爆负分，丢失区分度；本地诊断时裁剪到 [0,1]。
+    te_clamped = min(1.0, te)
+    roe_clamped = min(1.0, roe)
+    raw_overall = ((1 - te) * 100 + table_component + (1 - roe) * 100) / 3
+    overall = ((1 - te_clamped) * 100 + table_component + (1 - roe_clamped) * 100) / 3
     return {
         "file_name": file_name,
         "text_edit": te,
@@ -23,6 +28,7 @@ def score_pair(file_name: str, pred: str, gt: str) -> dict:
         "read_order_edit": roe,
         "has_table": has_table,
         "overall": overall,
+        "raw_overall": raw_overall,
     }
 
 
