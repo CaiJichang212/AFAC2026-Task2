@@ -80,3 +80,22 @@ def test_repair_preserves_span_empty_td_and_text_order():
     assert "<td></td>" in repaired
     assert repaired.startswith("前文<table>")
     assert repaired.endswith("</table>后文")
+
+
+def test_repair_wraps_loose_cells_into_row():
+    html = "<table><td>A</td><td>B</td></table>"
+
+    repaired = TableMerger().repair(html).markdown
+
+    assert "<tr>" in repaired
+    assert "<td>A</td>" in repaired
+    assert "<td>B</td>" in repaired
+
+
+def test_repair_drops_orphan_row_outside_table():
+    html = "<table><tr><td>A</td></tr></table><tr><td>孤立</td></tr>"
+
+    repaired = TableMerger().repair(html).markdown
+
+    assert "<td>A</td>" in repaired
+    assert "孤立" not in repaired

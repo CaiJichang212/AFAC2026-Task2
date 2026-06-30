@@ -19,6 +19,8 @@ class TableMerger:
         soup = BeautifulSoup(markdown, "html.parser")
         warnings: list[str] = []
         self._merge_adjacent_duplicate_headers(soup, markdown)
+        self._normalize_table_structure(soup)
+        self._drop_orphan_cells(soup)
         self._restore_text_outside_tables(soup)
         body = soup.body
         if body is not None:
@@ -90,3 +92,24 @@ class TableMerger:
                 table.insert_before(node)
             for node in trailing_nodes:
                 table.insert_after(node)
+
+    def _drop_orphan_cells(self, soup: BeautifulSoup) -> None:
+        for cell in soup.find_all(["td", "th"]):
+            parent = cell.find_parent("tr")
+            if parent is None:
+                cell.decompose()
+        for row in soup.find_all("tr"):
+            if row.find_parent("table") is None:
+                row.decompose()
+
+    def _normalize_table_structure(self, soup: BeautifulSoup) -> None:
+        for table in soup.find_all("table"):
+            loose_cells: list = []
+            for child in list(table.children):
+                if getattr(child, "name", None) in ("td", "th"):
+                    loose_cells.append(child.extract())
+            if loose_cells:
+                wrapper = soup.new_tag("tr")
+                for cell in loose_cells:
+                    wrapper.append(cell)
+                table.append(wrapper)
