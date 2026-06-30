@@ -26,6 +26,7 @@ from finix_restore.retry_planner import RetryPlanner
 from finix_restore.submission import SubmissionWriter
 from finix_restore.table_assembler import TableRowAssembler
 from finix_restore.table_merger import TableMerger
+from finix_restore.table_normalizer import TableNormalizer
 
 
 class PipelineError(RuntimeError):
@@ -47,6 +48,7 @@ class Pipeline:
         )
         self.table_merger = TableMerger()
         self.table_assembler = TableRowAssembler()
+        self.table_normalizer = TableNormalizer()
         self.quality_gate = QualityGate(
             config.paths,
             max_duplication_ratio=float(config.quality.get("max_duplication_ratio", 0.18)),
@@ -231,6 +233,10 @@ class Pipeline:
             extra_metrics["table_policy"] = table_policy or self._table_chunk_policy(self.config.chunk)
             assembled = self.table_assembler.assemble(ordered)
             repaired = self.table_merger.repair(assembled.markdown)
+            repaired = replace(
+                repaired,
+                markdown=self.table_normalizer.normalize(repaired.markdown),
+            )
             extra_metrics["table_assembled_tables"] = assembled.assembled_tables
             extra_metrics["table_assembly_warning_count"] = len(assembled.warnings)
             extra_metrics["table_assembly_warnings"] = ",".join(assembled.warnings)
