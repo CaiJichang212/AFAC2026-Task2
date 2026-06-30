@@ -32,9 +32,11 @@ class QualityGate:
         self.paths = paths
         self.max_duplication_ratio = max_duplication_ratio
         self.max_api_failure_ratio = max_api_failure_ratio
+        # table_page 的旧阈值 5000 对小尺寸费率表过严(行数本就少, 真实输出
+        # 可能只有一两千字符且内容完整), 降到 800 避免 false positive。
         self.min_chars_by_type = min_chars_by_type or {
             "long_strip": 2000,
-            "table_page": 5000,
+            "table_page": 800,
         }
 
     def validate_input_files(self, input_dirs: Sequence[Path]) -> QualityReport:

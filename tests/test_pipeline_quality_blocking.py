@@ -254,6 +254,46 @@ def test_pipeline_resume_hits_merged_cache_still_records_qc_metric(tmp_path):
     assert qc["metrics"]["from_merged_cache"] == 1
 
 
+def test_pipeline_resume_reruns_when_cached_quality_fails(tmp_path, monkeypatch):
+    """缓存命中但质量门不过时, 必须忽略缓存并重跑, 而不是返回坏结果。"""
+    from finix_restore.models import ChunkText
+    from finix_restore.pipeline import Pipeline
+
+    class HealsOnRerunClient:
+        calls = 0
+
+        def __init__(self, **kwargs):
+            pass
+
+        def parse_chunks(self, chunks, force_api=False):
+            HealsOnRerunClient.calls += 1
+            return [
+                ChunkText(chunk=chunk, markdown="# healed\n" + "x" * 2500, block_type="body", source="api")
+                for chunk in chunks
+            ], 0
+
+    input_dir = tmp_path / "images"
+    input_dir.mkdir()
+    Image.new("RGB", (5000, 300), "white").save(input_dir / "stale.png")
+    config = _config(tmp_path, [input_dir], tmp_path / "submission.csv")
+    config.quality["max_reruns_per_file"] = 1
+    config.paths.merged_dir.mkdir(parents=True, exist_ok=True)
+    # 缓存是一段未闭合的表格 HTML -> html_broken
+    (config.paths.merged_dir / "stale.md").write_text(
+        "<table><tr><td>broken", encoding="utf-8"
+    )
+    monkeypatch.setattr("finix_restore.pipeline.FinixApiClient", HealsOnRerunClient)
+
+    report = Pipeline(config).run()
+
+    assert report.passed
+    assert HealsOnRerunClient.calls == 1
+    summary = json.loads((config.paths.qc_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["passed"] is True
+    # 缓存被新结果覆盖
+    assert (config.paths.merged_dir / "stale.md").read_text(encoding="utf-8") != "<table><tr><td>broken"
+
+
 def test_pipeline_retry_can_rechunk_with_rowband_policy(tmp_path, monkeypatch):
     from finix_restore.models import Chunk, ImageProfile, QualityReport
     from finix_restore.pipeline import Pipeline

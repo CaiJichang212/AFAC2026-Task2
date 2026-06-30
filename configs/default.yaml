@@ -40,5 +40,10 @@ quality:
   max_duplication_ratio: 0.18
   max_api_failure_ratio: 0.20
   max_reruns_per_file: 2
+  # 各 doc_type 的最小输出字符数阈值; 低于此值记 too_short 风险。
+  # table_page 旧值 5000 对小尺寸费率表过严, 降到 800。
+  min_chars_by_type:
+    long_strip: 2000
+    table_page: 800
 runtime:
   image_concurrency: 5

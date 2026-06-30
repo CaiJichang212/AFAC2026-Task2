@@ -51,6 +51,9 @@ class Pipeline:
             config.paths,
             max_duplication_ratio=float(config.quality.get("max_duplication_ratio", 0.18)),
             max_api_failure_ratio=float(config.quality.get("max_api_failure_ratio", 0.20)),
+            min_chars_by_type={
+                k: int(v) for k, v in dict(config.quality.get("min_chars_by_type") or {}).items()
+            } or None,
         )
         self.retry_planner = RetryPlanner(max_reruns_per_file=int(config.quality.get("max_reruns_per_file", 2)))
         self.api_limiter = ApiConcurrencyLimiter(
@@ -129,12 +132,16 @@ class Pipeline:
                 failed_chunks=0,
                 extra_metrics={"from_merged_cache": 1},
             )
-            return ProcessedFile(
-                file_name=profile.file_name,
-                markdown=cached_merged,
-                quality=quality,
-                rerun_count=0,
-            )
+            if quality.passed:
+                return ProcessedFile(
+                    file_name=profile.file_name,
+                    markdown=cached_merged,
+                    quality=quality,
+                    rerun_count=0,
+                )
+            # 缓存存在但质量门不过(典型场景: 上次跑出 html_broken / too_short
+            # 被写盘缓存住)。继续走下面的重跑循环, 由 retry_planner 触发
+            # force_api / 调参, 避免坏缓存永久卡住 resume。
 
         hints = self.layout_sentry.analyze(image_path)
         chunk_config = self.config.chunk
@@ -214,8 +221,12 @@ class Pipeline:
             extra_metrics["horizontal_split_chunks"] = sum(
                 1 for chunk_text in ordered if "horizontal_split" in chunk_text.chunk.risk_flags
             )
+            # 必须在 order_resolver 过滤之前统计 reference chunk。
+            # full_page_reference 的 row=-1, 会被 ReadingOrderResolver._is_reference_chunk
+            # 过滤掉, 若在 ordered 上统计会恒为 0, 误报 table_reference_missing,
+            # 进而触发 force_rowband 反复重切 -> chunk_id 漂移 -> API 缓存永久 miss。
             extra_metrics["table_reference_chunks"] = sum(
-                1 for chunk_text in ordered if chunk_text.chunk.variant_kind == "full_page_reference"
+                1 for chunk_text in normalized if chunk_text.chunk.variant_kind == "full_page_reference"
             )
             extra_metrics["table_policy"] = table_policy or self._table_chunk_policy(self.config.chunk)
             assembled = self.table_assembler.assemble(ordered)
