@@ -93,6 +93,8 @@ class QualityGate:
         stripped = text.strip()
         if not stripped:
             risks.append("empty_output")
+            if doc_type == "table_page" and chunk_count > 0:
+                risks.append("force_retry_empty")
         elif len(stripped) < self.min_chars_by_type.get(doc_type, 0):
             risks.append("too_short")
 
