@@ -76,7 +76,8 @@ class TableRowAssembler:
                 row_band = parsed.chunk_text.chunk.row
             row_bands.setdefault(row_band, []).append(parsed)
 
-        text_blocks = self._unique_text_blocks(list(reference_chunks) + list(data_chunks))
+        text_sources = list(reference_chunks) if reference_chunks else list(data_chunks)
+        text_blocks = self._unique_text_blocks(text_sources)
         assembled_bands: list[ParsedTable | None] = []
         fallback_markdown: list[str] = []
         for band_chunks in row_bands.values():
@@ -90,8 +91,18 @@ class TableRowAssembler:
             if assembled_table is None:
                 if len(band_chunks) > 1 and "row_alignment_uncertain" not in warnings:
                     warnings.append("row_alignment_uncertain")
-                fallback_markdown.append("\n".join(parsed.chunk_text.markdown for parsed in band_chunks))
-                assembled_bands.append(None)
+                grouped_tables = self._fallback_group_by_columns(band_chunks)
+                if grouped_tables:
+                    assembled_bands.append(grouped_tables[0])
+                    for extra in grouped_tables[1:]:
+                        assembled_bands.append(extra)
+                    fallback_markdown.append("")
+                    if len(grouped_tables) > 1 and "fallback_multi_table_split" not in warnings:
+                        warnings.append("fallback_multi_table_split")
+                else:
+                    fallback_text = "\n".join(parsed.chunk_text.markdown for parsed in band_chunks).strip()
+                    if fallback_text and fallback_text not in text_blocks:
+                        text_blocks.append(fallback_text)
             else:
                 assembled_bands.append(assembled_table)
 
@@ -102,7 +113,8 @@ class TableRowAssembler:
             fallback_index = 0
             for table in assembled_bands:
                 if table is None:
-                    markdown_parts.append(fallback_markdown[fallback_index])
+                    if fallback_markdown[fallback_index]:
+                        markdown_parts.append(fallback_markdown[fallback_index])
                     fallback_index += 1
                 else:
                     markdown_parts.append(self._render_table(table.rows))
@@ -138,28 +150,26 @@ class TableRowAssembler:
     def _assemble_row_band(self, parsed_chunks: Sequence[ParsedChunkTables]) -> ParsedTable | None:
         if not parsed_chunks:
             return None
-        if any(len(parsed.tables) != 1 for parsed in parsed_chunks):
-            return None
 
-        first_table = parsed_chunks[0].tables[0]
+        valid_chunks = [parsed for parsed in parsed_chunks if parsed.tables]
+        if not valid_chunks:
+            return None
+        multi_table = any(len(parsed.tables) != 1 for parsed in valid_chunks)
+
+        first_table = valid_chunks[0].tables[0]
         first_rows = first_table.rows
         if len(parsed_chunks) == 1:
             return first_table
 
-        if any(parsed.chunk_text.chunk.anchor_bbox is not None for parsed in parsed_chunks[1:]):
-            return self._align_by_anchor(parsed_chunks)
+        if not multi_table and any(
+            parsed.chunk_text.chunk.anchor_bbox is not None for parsed in valid_chunks[1:]
+        ):
+            return self._align_by_anchor(valid_chunks)
 
-        row_count = len(first_rows)
-        if row_count == 0 or any(len(parsed.tables[0].rows) != row_count for parsed in parsed_chunks[1:]):
-            return None
+        if multi_table:
+            return self._stitch_multi_table_chunks(valid_chunks)
 
-        stitched_rows: list[tuple[ParsedCell, ...]] = []
-        for row_index in range(row_count):
-            merged_cells: list[ParsedCell] = []
-            for parsed in parsed_chunks:
-                merged_cells.extend(parsed.tables[0].rows[row_index])
-            stitched_rows.append(tuple(merged_cells))
-        return self._table_from_rows(tuple(stitched_rows))
+        return self._stitch_with_common_rows(valid_chunks)
 
     def _align_by_anchor(self, parsed_chunks: Sequence[ParsedChunkTables]) -> ParsedTable | None:
         merged_rows = [tuple(row) for row in parsed_chunks[0].tables[0].rows]
@@ -171,8 +181,10 @@ class TableRowAssembler:
             for left_row, right_row in zip(merged_rows, right_rows):
                 if not left_row or not right_row:
                     continue
+                if not left_row[0].text or not right_row[0].text:
+                    continue
                 scores.append(Levenshtein.normalized_similarity(left_row[0].text, right_row[0].text))
-            if scores and (sum(scores) / len(scores)) < 0.90:
+            if scores and (sum(scores) / len(scores)) < 0.80:
                 return None
             updated_rows: list[tuple[ParsedCell, ...]] = []
             for left_row, right_row in zip(merged_rows, right_rows):
@@ -180,6 +192,48 @@ class TableRowAssembler:
                 updated_rows.append(tuple(list(left_row) + list(tail)))
             merged_rows = updated_rows
         return self._table_from_rows(tuple(merged_rows))
+
+    def _stitch_with_common_rows(self, parsed_chunks: Sequence[ParsedChunkTables]) -> ParsedTable:
+        chunk_tables = [parsed.tables[0] for parsed in parsed_chunks if parsed.tables]
+        if not chunk_tables:
+            return self._table_from_rows(())
+        common = min(len(table.rows) for table in chunk_tables)
+        stitched: list[tuple[ParsedCell, ...]] = []
+        for row_index in range(common):
+            merged_cells: list[ParsedCell] = []
+            for table in chunk_tables:
+                merged_cells.extend(table.rows[row_index])
+            stitched.append(tuple(merged_cells))
+        for table in chunk_tables:
+            for extra_row in table.rows[common:]:
+                stitched.append(tuple(extra_row))
+        return self._table_from_rows(tuple(stitched))
+
+    def _stitch_multi_table_chunks(self, parsed_chunks: Sequence[ParsedChunkTables]) -> ParsedTable:
+        all_rows: list[tuple[ParsedCell, ...]] = []
+        for parsed in parsed_chunks:
+            for table in parsed.tables:
+                for row in table.rows:
+                    all_rows.append(tuple(row))
+        return self._table_from_rows(tuple(all_rows))
+
+    def _fallback_group_by_columns(
+        self, band_chunks: Sequence[ParsedChunkTables]
+    ) -> list[ParsedTable]:
+        buckets: dict[int, list[tuple[ParsedCell, ...]]] = {}
+        for parsed in band_chunks:
+            for table in parsed.tables:
+                for row in table.rows:
+                    if not row:
+                        continue
+                    buckets.setdefault(len(row), []).append(tuple(row))
+        if not buckets:
+            return []
+        ordered = sorted(buckets.items(), key=lambda kv: len(kv[1]), reverse=True)
+        tables: list[ParsedTable] = []
+        for _, rows in ordered:
+            tables.append(self._table_from_rows(tuple(rows)))
+        return tables
 
     def _render_table(self, rows: tuple[tuple[ParsedCell, ...], ...]) -> str:
         row_html = []

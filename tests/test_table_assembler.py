@@ -81,7 +81,7 @@ def test_table_row_assembler_vertically_merges_duplicate_headers():
     assert result.assembled_tables == 1
 
 
-def test_table_row_assembler_keeps_original_order_when_alignment_is_uncertain():
+def test_table_row_assembler_stitches_uneven_rows_by_common_count():
     left = _chunk_text(
         "<table><tr><td>终身</td><td>1</td></tr><tr><td>定期</td><td>2</td></tr></table>",
         row_band=0,
@@ -97,10 +97,9 @@ def test_table_row_assembler_keeps_original_order_when_alignment_is_uncertain():
 
     result = TableRowAssembler().assemble([left, right])
 
-    assert "row_alignment_uncertain" in result.warnings
-    assert "<td>终身</td><td>1</td>" in result.markdown
+    assert "<td>终身</td><td>1</td><td>男</td><td>2176</td>" in result.markdown
     assert "<td>定期</td><td>2</td>" in result.markdown
-    assert "<td>男</td><td>2176</td>" in result.markdown
+    assert result.assembled_tables == 1
 
 
 def test_table_row_assembler_merges_vertical_bands_with_text_and_overlap_dedup():
@@ -164,3 +163,81 @@ def test_table_row_assembler_aligns_horizontal_chunks_by_anchor_column():
     assert "<th>年龄</th><th>男</th><th>女</th><th>保额</th><th>费率</th>" in result.markdown
     assert result.markdown.count("<td>18岁</td>") == 1
     assert "<td>18岁</td><td>100</td><td>120</td><td>10万</td><td>2176</td>" in result.markdown
+
+
+def test_table_row_assembler_concatenates_multi_table_chunk():
+    chunk = _chunk_text(
+        "<table><tr><td>A</td><td>1</td></tr></table>"
+        "<table><tr><td>B</td><td>2</td></tr></table>",
+        row_band=0,
+        col_band=0,
+        chunk_id="multi-left",
+    )
+    other = _chunk_text(
+        "<table><tr><td>C</td><td>3</td></tr></table>",
+        row_band=0,
+        col_band=1,
+        chunk_id="multi-right",
+    )
+
+    result = TableRowAssembler().assemble([chunk, other])
+
+    assert "<td>A</td><td>1</td>" in result.markdown
+    assert "<td>B</td><td>2</td>" in result.markdown
+    assert "<td>C</td><td>3</td>" in result.markdown
+    # 多表串接为单表, 不再散落多个 <table>
+    assert result.markdown.count("<table>") == 1
+
+
+def test_table_row_assembler_fallback_groups_rows_by_column_count():
+    # anchor 对齐失败 (首列完全不同) -> 走 fallback 按列数分组
+    left = _chunk_text(
+        "<table><tr><td>甲</td><td>1</td></tr><tr><td>乙</td><td>2</td></tr></table>",
+        row_band=0,
+        col_band=0,
+        chunk_id="fb-left",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+    right = _chunk_text(
+        "<table><tr><td>完全不同甲</td><td>9</td></tr><tr><td>完全不同乙</td><td>8</td></tr></table>",
+        row_band=0,
+        col_band=1,
+        chunk_id="fb-right",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+
+    result = TableRowAssembler().assemble([left, right])
+
+    # fallback 后仍是单表结构 (两块列数相同, 归为一组), 不输出原始 markdown 多表并列
+    assert result.markdown.count("<table>") == 1
+    assert "<td>甲</td><td>1</td>" in result.markdown
+    assert "<td>完全不同甲</td><td>9</td>" in result.markdown
+
+
+def test_table_row_assembler_ignores_no_table_band_when_combining_tables():
+    top = _chunk_text(
+        "<table><tr><td>项目</td><td>金额</td></tr><tr><td>A</td><td>1</td></tr></table>",
+        row_band=0,
+        col_band=0,
+        chunk_id="top-table",
+    )
+    text_only = _chunk_text(
+        "识别出的说明文字, 没有表格标签",
+        row_band=1,
+        col_band=0,
+        chunk_id="middle-text",
+    )
+    bottom = _chunk_text(
+        "<table><tr><td>项目</td><td>金额</td></tr><tr><td>B</td><td>2</td></tr></table>",
+        row_band=2,
+        col_band=0,
+        chunk_id="bottom-table",
+    )
+
+    result = TableRowAssembler().assemble([top, text_only, bottom])
+
+    assert result.markdown.count("<table>") == 1
+    assert "识别出的说明文字" in result.markdown
+    assert "<td>A</td><td>1</td>" in result.markdown
+    assert "<td>B</td><td>2</td>" in result.markdown
+    assert result.assembled_tables == 1
