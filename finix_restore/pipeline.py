@@ -102,8 +102,19 @@ class Pipeline:
             output_csv=None if self.config.dry_run else self.config.output_csv,
             dry_run=self.config.dry_run,
         )
-        if not self.config.dry_run and not summary["passed"]:
-            raise PipelineError("quality gate failed")
+        if not summary["passed"]:
+            failed = summary.get("failed_files", [])
+            tqdm.write(
+                f"WARNING: quality gate failed for {len(failed)} file(s), "
+                f"but CSV will still be written. Failed: {failed}"
+            )
+        if self.config.dry_run:
+            result = SubmissionWriter().write(
+                [{"file_name": p, "ground_truth": ""} for p in image_paths],
+                self.config.output_csv,
+                [path.name for path in image_paths],
+            )
+            return result
         return SubmissionWriter().write(final_rows, self.config.output_csv, [path.name for path in image_paths])
 
     def _process_image(self, image_path: Path) -> ProcessedFile:

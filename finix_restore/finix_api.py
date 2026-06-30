@@ -6,7 +6,7 @@ import random
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Callable
 
@@ -70,6 +70,10 @@ class FinixApiClient:
         self._disabled_user_ids: set[str] = set()
         self._user_lock = threading.Lock()
         self._log_lock = log_lock or threading.Lock()
+        # Safety timeout per-chunk future.result() to prevent indefinite hang
+        # when requests timeout fails to trigger. Covers worst-case
+        # (timeout * retries + backoff) with generous headroom.
+        self._chunk_result_timeout = float(timeout_seconds) * (max_retries + 2)
         self.limiter = limiter or ApiConcurrencyLimiter(
             global_concurrency=self.concurrency,
             user_ids=self.user_ids,
@@ -130,7 +134,24 @@ class FinixApiClient:
             for index, future in enumerate(futures):
                 chunk = chunks[index]
                 try:
-                    results[index] = future.result()
+                    results[index] = future.result(timeout=self._chunk_result_timeout)
+                except FutureTimeoutError:
+                    failed_chunks += 1
+                    results[index] = ChunkText(
+                        chunk=chunk,
+                        markdown="",
+                        block_type="unknown",
+                        source="api",
+                    )
+                    self._log(
+                        {
+                            "event": "chunk_timeout",
+                            "run_id": self.run_id,
+                            "file_name": chunk.file_name,
+                            "chunk_id": chunk.chunk_id,
+                            "timeout_seconds": self._chunk_result_timeout,
+                        }
+                    )
                 except FinixApiError as exc:
                     if "authentication" in str(exc):
                         raise
