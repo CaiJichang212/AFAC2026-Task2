@@ -23,29 +23,35 @@ class RetryPlanner:
             return actions
 
         risks = set(report.risks)
-        # P3.1: 空产出强制重试, 且降低并发到 1 排除限流, 提高重试成功率。
+        # 仅"限流/繁忙/HTML 破碎/整体失败率过高"这类真正与服务端并发压力相关的
+        # 风险才应把重跑并发降为 1; 其它风险 (too_short, table_reference_missing
+        # 等) 与并发无关, 强行串行只会成倍拖慢重跑。
+        throttling_risks = {
+            "service_busy_html",
+            "full_html_page",
+            "html_broken",
+            "api_failure_ratio_high",
+        }
         if "empty_output" in risks or "force_retry_empty" in risks:
             actions["force_api"] = True
-            actions["concurrency"] = 1
-        if "service_busy_html" in risks or "full_html_page" in risks:
+            # empty_output 未必是限流引起, 不再强制降到 1; 若同时有限流风险后面会覆盖。
+        if throttling_risks & risks:
             actions["force_api"] = True
             actions["concurrency"] = 1
-        if "html_broken" in risks:
-            actions["force_api"] = True
-            actions["concurrency"] = 1
-        if "api_failure_ratio_high" in risks:
-            actions["concurrency"] = 1
-        if {"table_count_explosion", "table_assembly_uncertain", "table_reference_missing", "horizontal_split_unmerged"} & risks:
+        table_layout_risks = {
+            "table_count_explosion",
+            "table_assembly_uncertain",
+            "table_reference_missing",
+            "horizontal_split_unmerged",
+        }
+        if table_layout_risks & risks:
             actions["force_rowband"] = True
-            actions["concurrency"] = max(1, int(actions["concurrency"]))
         if {"table_count_explosion", "horizontal_split_unmerged"} & risks:
             actions["disable_horizontal_split"] = True
-            actions["concurrency"] = max(1, int(actions["concurrency"]))
         if "too_short" in risks:
             actions["overlap_scale"] = 1.5
             if report.metrics.get("doc_type") == "table_page":
                 actions["table_grid_scale"] = 1.15
-                actions["concurrency"] = max(1, int(actions["concurrency"]))
 
         actions["rerun"] = True
         return actions

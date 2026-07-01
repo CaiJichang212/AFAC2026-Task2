@@ -1,9 +1,9 @@
 api:
   url: "${FINIX_API_URL}"
-  timeout_seconds: 420
+  timeout_seconds: 240
   max_retries: 3
-  concurrency: 25
-  per_user_concurrency: 5
+  concurrency: 20
+  per_user_concurrency: 4
 chunk:
   hard_max_pixels: 16777216
   safe_max_pixels: 12000000
@@ -46,4 +46,4 @@ quality:
   long_strip: 2000
   table_page: 800
 runtime:
-  image_concurrency: 3
+  image_concurrency: 4

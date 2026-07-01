@@ -246,7 +246,7 @@ def test_parse_chunks_returns_results_in_input_order_with_failures(tmp_path, mon
             self._args = args
             self._kwargs = kwargs
 
-        def result(self):
+        def result(self, timeout=None):
             return self._fn(*self._args, **self._kwargs)
 
     class FakeExecutor:

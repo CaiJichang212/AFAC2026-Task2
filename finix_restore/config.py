@@ -92,8 +92,27 @@ def load_config(args) -> RunConfig:
     api["url"] = api_url
     per_user = int(api.get("per_user_concurrency", 1))
     requested = int(api.get("concurrency", 1))
-    api["concurrency"] = min(requested, max(1, len(user_ids) * per_user))
+    effective_concurrency = min(requested, max(1, len(user_ids) * per_user))
+    api["concurrency"] = effective_concurrency
     api["per_user_concurrency"] = per_user
+    # 让"配置了但被 cap"这类问题在启动时可见, 避免看着 25 实际只有 5 的误判。
+    api["requested_concurrency"] = requested
+    api["effective_concurrency"] = effective_concurrency
+    api["user_count"] = len(user_ids)
+    if effective_concurrency < requested and not dry_run:
+        import sys
+
+        print(
+            "[finix_restore] WARNING: api.concurrency={requested} is capped to {effective} "
+            "by user_ids ({n}) * per_user_concurrency ({p}). "
+            "Increase FINIX_USER_IDS or per_user_concurrency to raise real throughput.".format(
+                requested=requested,
+                effective=effective_concurrency,
+                n=len(user_ids),
+                p=per_user,
+            ),
+            file=sys.stderr,
+        )
 
     runtime_raw = raw.get("runtime") or {}
     runtime = {"image_concurrency": int(runtime_raw.get("image_concurrency", 1))}
