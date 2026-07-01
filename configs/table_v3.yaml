@@ -1,0 +1,49 @@
+api:
+  url: "${FINIX_API_URL}"
+  timeout_seconds: 420
+  max_retries: 3
+  concurrency: 25
+  per_user_concurrency: 5
+chunk:
+  hard_max_pixels: 16777216
+  safe_max_pixels: 12000000
+  min_pixels: 4096
+  crop_margin_px: 24
+  long:
+    target_pixels: 6000000
+    safe_max_pixels: 8000000
+    max_window_height: 4000
+    min_window_height: 1800
+    vertical_overlap: 320
+    blank_band_search_px: 360
+  table:
+   target_pixels: 8000000
+   safe_max_pixels: 12000000
+   full_page_max_pixels: 15000000
+    horizontal_overlap: 160
+    vertical_overlap: 280
+    cut_search_px: 360
+    policy_version: rowband_v2
+    full_page_reference_max_pixels: 16000000
+   row_band_target_pixels: 6000000
+   row_band_safe_pixels: 10000000
+    min_crop_coverage: 0.55
+    preserve_full_width: true
+    allow_horizontal_split: true
+    anchor_left_px: 640
+  normal:
+    full_page_max_pixels: 12000000
+    target_pixels: 8000000
+merge:
+  dedup_window_chars_long: 1200
+  dedup_window_chars_table: 600
+  dedup_similarity_threshold: 0.88
+quality:
+  max_duplication_ratio: 0.18
+  max_api_failure_ratio: 0.20
+  max_reruns_per_file: 3
+  min_chars_by_type:
+    long_strip: 2000
+    table_page: 800
+runtime:
+  image_concurrency: 3

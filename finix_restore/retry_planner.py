@@ -23,6 +23,10 @@ class RetryPlanner:
             return actions
 
         risks = set(report.risks)
+        # P3.1: 空产出强制重试, 且降低并发到 1 排除限流, 提高重试成功率。
+        if "empty_output" in risks or "force_retry_empty" in risks:
+            actions["force_api"] = True
+            actions["concurrency"] = 1
         if "service_busy_html" in risks or "full_html_page" in risks:
             actions["force_api"] = True
             actions["concurrency"] = 1

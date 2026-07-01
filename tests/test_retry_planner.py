@@ -34,3 +34,17 @@ def test_retry_planner_for_html_broken_keeps_force_api():
     assert plan["concurrency"] == 1
     assert plan["force_rowband"] is True
     assert plan["disable_horizontal_split"] is False
+
+
+def test_retry_planner_forces_api_and_low_concurrency_for_empty_output():
+    # P3.1: 空产出应触发强制重试 + 并发降为 1 (排除限流)。
+    planner = RetryPlanner(max_reruns_per_file=3)
+    report = QualityReport(
+        passed=False,
+        risks=["empty_output", "force_retry_empty"],
+        metrics={"doc_type": "table_page", "chars": 0},
+    )
+    plan = planner.plan(report, rerun_count=0)
+    assert plan["rerun"] is True
+    assert plan["force_api"] is True
+    assert plan["concurrency"] == 1

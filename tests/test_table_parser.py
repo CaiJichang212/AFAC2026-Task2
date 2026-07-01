@@ -89,3 +89,49 @@ def test_table_chunk_parser_preserves_span_metadata():
     assert title.colspan == 3
     assert age.rowspan == 2
     assert empty_cell.text == ""
+
+
+def test_table_parser_marks_header_row_for_financial_keywords():
+    # P2.2: 第一行含金融表表头关键词时, 自动转为 header (is_header=True)。
+    from finix_restore.table_parser import TableChunkParser
+    from finix_restore.models import Chunk, ChunkText
+    from pathlib import Path
+
+    chunk = ChunkText(
+        chunk=Chunk(
+            chunk_id="c1", file_name="t.png", image_path=Path("/tmp/t.jpg"),
+            bbox=(0, 0, 100, 100), row=0, col=0,
+            overlap={"left": 0, "right": 0, "top": 0, "bottom": 0}, image_sha1="s",
+            table_group_id="g", row_band=0, col_band=0,
+            base_bbox=(0, 0, 100, 100), overlap_bbox=(0, 0, 100, 100),
+        ),
+        markdown="<table><tr><td>投保年龄</td><td>保单年度</td></tr><tr><td>18</td><td>100</td></tr></table>",
+        block_type="table", source="test",
+    )
+    parsed = TableChunkParser().parse(chunk)
+    first_row = parsed.tables[0].rows[0]
+    assert all(cell.is_header for cell in first_row), "表头行未标记为 header"
+    second_row = parsed.tables[0].rows[1]
+    assert not any(cell.is_header for cell in second_row), "数据行被误标为 header"
+
+
+def test_table_parser_does_not_mark_pure_data_rows_as_header():
+    # P2.2: 第一行不含表头关键词时 (纯数字), 不应转 header。
+    from finix_restore.table_parser import TableChunkParser
+    from finix_restore.models import Chunk, ChunkText
+    from pathlib import Path
+
+    chunk = ChunkText(
+        chunk=Chunk(
+            chunk_id="c2", file_name="t.png", image_path=Path("/tmp/t.jpg"),
+            bbox=(0, 0, 100, 100), row=0, col=0,
+            overlap={"left": 0, "right": 0, "top": 0, "bottom": 0}, image_sha1="s",
+            table_group_id="g", row_band=0, col_band=0,
+            base_bbox=(0, 0, 100, 100), overlap_bbox=(0, 0, 100, 100),
+        ),
+        markdown="<table><tr><td>18</td><td>100</td></tr><tr><td>19</td><td>130</td></tr></table>",
+        block_type="table", source="test",
+    )
+    parsed = TableChunkParser().parse(chunk)
+    first_row = parsed.tables[0].rows[0]
+    assert not any(cell.is_header for cell in first_row), "纯数字行被误标为 header"

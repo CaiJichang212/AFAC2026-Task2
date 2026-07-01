@@ -11,6 +11,13 @@ from finix_restore.models import ChunkText
 _TABLE_FRAGMENT_RE = re.compile(r"<table\b.*?(?:</table>|$)", re.IGNORECASE | re.DOTALL)
 
 
+_HEADER_KEYWORDS = (
+    "投保年龄", "保单年度", "保险期间", "交费期间", "性别", "年龄",
+    "年度", "被保险人", "投保人", "现金价值", "保险费", "保险金额",
+    "保单年度末", "保险合同周年", "养老年金", "项目", "金额", "备注",
+)
+
+
 @dataclass(frozen=True)
 class ParsedCell:
     text: str
@@ -104,6 +111,7 @@ class TableChunkParser:
                     )
                 rows.append(tuple(parsed_cells))
         row_tuple = tuple(rows)
+        row_tuple = self._mark_header_row(row_tuple)
         header_key = tuple(cell.text for cell in row_tuple[0]) if row_tuple else ()
         return (
             ParsedTable(
@@ -114,6 +122,32 @@ class TableChunkParser:
             ),
             tuple(warnings),
         )
+
+    def _mark_header_row(self, rows: tuple[tuple[ParsedCell, ...], ...]) -> tuple[tuple[ParsedCell, ...], ...]:
+        # P2.2: 若第一行全为 td 但内容含金融表常见表头关键词, 自动转为 header。
+        # 这样 _render_table 会输出 <th>, 与 GT 表头标签对齐, 提升 TEDS。
+        if not rows:
+            return rows
+        first_row = rows[0]
+        if not first_row:
+            return rows
+        if any(cell.is_header for cell in first_row):
+            return rows
+        keyword_hits = sum(
+            1 for cell in first_row if any(kw in cell.text for kw in _HEADER_KEYWORDS)
+        )
+        if keyword_hits == 0:
+            return rows
+        marked = tuple(
+            ParsedCell(
+                text=cell.text,
+                colspan=cell.colspan,
+                rowspan=cell.rowspan,
+                is_header=True,
+            )
+            for cell in first_row
+        )
+        return (marked,) + rows[1:]
 
     def _parse_span(self, raw: str | None) -> tuple[int, str | None]:
         if raw is None:

@@ -75,7 +75,8 @@ def test_table_row_assembler_vertically_merges_duplicate_headers():
 
     result = TableRowAssembler().assemble([top, bottom])
 
-    assert result.markdown.count("<td>项目</td><td>金额</td>") == 1
+    # P2.2: "项目/金额"被自动检测为表头, 渲染为 <th>。验证表头去重仍生效。
+    assert result.markdown.count("项目</th><th>金额</th>") == 1
     assert "<td>A</td><td>1</td>" in result.markdown
     assert "<td>B</td><td>2</td>" in result.markdown
     assert result.assembled_tables == 1
@@ -186,7 +187,8 @@ def test_table_row_assembler_concatenates_multi_table_chunk():
     assert "<td>B</td><td>2</td>" in result.markdown
     assert "<td>C</td><td>3</td>" in result.markdown
     # 多表串接为单表, 不再散落多个 <table>
-    assert result.markdown.count("<table>") == 1
+    # P2.1: table 标签现在带 border 属性, 统计开始标签数验证单表。
+    assert result.markdown.count("<table") == 1
 
 
 def test_table_row_assembler_fallback_groups_rows_by_column_count():
@@ -209,7 +211,8 @@ def test_table_row_assembler_fallback_groups_rows_by_column_count():
     result = TableRowAssembler().assemble([left, right])
 
     # fallback 后仍是单表结构 (两块列数相同, 归为一组), 不输出原始 markdown 多表并列
-    assert result.markdown.count("<table>") == 1
+    # P2.1/P0.3: table 标签带属性, fallback 强制单表包裹。
+    assert result.markdown.count("<table") == 1
     assert "<td>甲</td><td>1</td>" in result.markdown
     assert "<td>完全不同甲</td><td>9</td>" in result.markdown
 
@@ -236,8 +239,66 @@ def test_table_row_assembler_ignores_no_table_band_when_combining_tables():
 
     result = TableRowAssembler().assemble([top, text_only, bottom])
 
-    assert result.markdown.count("<table>") == 1
+    # P2.1: table 标签带 border 属性, 统计开始标签数验证单表。
+    assert result.markdown.count("<table") == 1
     assert "识别出的说明文字" in result.markdown
     assert "<td>A</td><td>1</td>" in result.markdown
     assert "<td>B</td><td>2</td>" in result.markdown
+    assert result.assembled_tables == 1
+
+
+def test_table_row_assembler_renders_table_with_border_attributes():
+    # P2.1: 输出的 <table> 应带 border/cellpadding/cellspacing 属性, 对齐 GT。
+    chunk = _chunk_text(
+        "<table><tr><td>A</td><td>1</td></tr></table>",
+        row_band=0, col_band=0, chunk_id="border-test",
+    )
+    result = TableRowAssembler().assemble([chunk])
+    assert 'border="1"' in result.markdown
+    assert 'cellpadding="8"' in result.markdown
+    assert 'cellspacing="0"' in result.markdown
+
+
+def test_table_row_assembler_aligns_uneven_rows_left_longer():
+    # P0.2: 左块行数 > 右块行数时, 左块多出的行应保留, 不丢失尾部数据。
+    left = _chunk_text(
+        "<table>"
+        "<tr><td>18</td><td>100</td></tr>"
+        "<tr><td>19</td><td>130</td></tr>"
+        "</table>",
+        row_band=0, col_band=0, chunk_id="long-left",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+    right = _chunk_text(
+        "<table><tr><td>18</td><td>200</td></tr></table>",
+        row_band=0, col_band=1, chunk_id="short-right",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+    result = TableRowAssembler().assemble([left, right])
+    # 第 1 行横向缝合
+    assert "<td>18</td><td>100</td><td>200</td>" in result.markdown
+    # 左块第 2 行保留 (不丢失)
+    assert "<td>19</td><td>130</td>" in result.markdown
+    assert result.assembled_tables == 1
+
+
+def test_table_row_assembler_aligns_uneven_rows_right_longer():
+    # P0.2: 右块行数 > 左块行数时, 右块多出的行应追加, 不丢失尾部数据。
+    left = _chunk_text(
+        "<table><tr><td>18</td><td>100</td></tr></table>",
+        row_band=0, col_band=0, chunk_id="short-left",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+    right = _chunk_text(
+        "<table>"
+        "<tr><td>18</td><td>200</td></tr>"
+        "<tr><td>19</td><td>230</td></tr>"
+        "</table>",
+        row_band=0, col_band=1, chunk_id="long-right",
+        anchor_bbox=(0, 0, 40, 100),
+    )
+    result = TableRowAssembler().assemble([left, right])
+    assert "<td>18</td><td>100</td><td>200</td>" in result.markdown
+    # 右块第 2 行追加 (不丢失)
+    assert "<td>19</td><td>230</td>" in result.markdown
     assert result.assembled_tables == 1
