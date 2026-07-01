@@ -552,7 +552,7 @@ nohup .venv/bin/python -m finix_restore.cli \
   --input_dir "data/AFAC 训练数据集/finixdocbench_huge_table_100/images" \
   --work_dir outputs/table_train_run_v3 \
   --output_csv outputs/table_train_run_v3/submission_A_table_train_run_v3.csv \
-  --config configs/table_v2.yaml \
+  --config configs/table_v3.yaml \
   > outputs/table_train_run_v3.log 2>&1 &
 
 # 2. 评分对比
