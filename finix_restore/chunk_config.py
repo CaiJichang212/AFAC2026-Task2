@@ -30,6 +30,7 @@ class TableChunkConfig:
     preserve_full_width: bool = True
     allow_horizontal_split: bool = True
     anchor_left_px: int = 640
+    min_row_band_height: int = 1800
 
 
 @dataclass(frozen=True)

@@ -160,13 +160,22 @@ class TableStructurePlanner:
         cx0, cy0, cx1, cy1 = content_box
         content_width = max(1, cx1 - cx0)
         target_height = max(1, table_cfg.row_band_target_pixels // content_width)
+        target_height = max(target_height, int(getattr(table_cfg, 'min_row_band_height', 1800)))
 
         band_slices: list[tuple[int, int, str]] = []
+        # 当 content_width 很大时 target_height 会塌缩到 < vertical_overlap,
+        # 此时 next_y0 = y1 - overlap 落到 <= y0, 回退分支只推进 1 像素,
+        # 把一张高图切成 >10000 个单像素条带, 触发 iteration guard。
+        # 用 target_height 的一半作为每轮最小步长, 保证循环按
+        # O(content_height / target_height) 收敛, 同时 guard 上限跟随
+        # 实际像素高度, 避免对大图误报。
+        min_step = max(1, target_height // 2)
         y0 = cy0
         guard = 0
+        guard_limit = max(10000, (cy1 - cy0) + 10)
         while y0 < cy1:
             guard += 1
-            if guard > 10000:
+            if guard > guard_limit:
                 raise RuntimeError("TableStructurePlanner exceeded row-band iteration guard")
             target_y1 = min(cy1, y0 + target_height)
             cut_y1, source = nearest_band_center(target_y1, hints.horizontal_blank_bands, table_cfg.cut_search_px)
@@ -183,8 +192,10 @@ class TableStructurePlanner:
             if y1 >= cy1:
                 break
             next_y0 = y1 - table_cfg.vertical_overlap if table_cfg.vertical_overlap else y1
-            if next_y0 <= y0:
-                next_y0 = y0 + 1
+            if next_y0 - y0 < min_step:
+                next_y0 = y0 + min_step
+            if next_y0 >= cy1:
+                break
             y0 = next_y0
 
         entries: list[TablePlanEntry] = []

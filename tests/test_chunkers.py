@@ -383,6 +383,7 @@ def test_table_rowband_chunker_writes_reference_and_render_metadata(tmp_path):
             "full_page_reference_max_pixels": 800_000,
             "row_band_target_pixels": 300_000,
             "row_band_safe_pixels": 400_000,
+            "min_row_band_height": 500,
             "allow_horizontal_split": False,
         }
     })

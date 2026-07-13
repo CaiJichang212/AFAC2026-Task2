@@ -145,3 +145,29 @@ def test_table_structure_planner_rowband_v2_can_disable_horizontal_split(tmp_pat
 
     assert all("horizontal_split" not in entry.risk_flags for entry in plan.entries)
     assert all(entry.anchor_bbox is None for entry in plan.entries)
+
+
+def test_rowband_v2_handles_very_wide_image_without_explosion(tmp_path):
+    """Regression: 超大宽图 target_height 塌缩导致切片爆炸/guard 崩溃.
+
+    旧逻辑下 content_width=40000 时 target_height=150 < vertical_overlap,
+    每轮只推进 1px, 把图切成上万条带并触发 iteration guard.
+    修复后 min_row_band_height 给 target_height 设下限, 切片数保持合理.
+    """
+    from PIL import Image
+    wide = 40000
+    tall = 50000
+    image_path = tmp_path / "huge_wide.jpg"
+    Image.new("RGB", (wide, tall), "white").save(image_path)
+    profile = _profile(image_path, wide, tall)
+    hints = LayoutHints((0, 0, wide, tall), [], [], 0.5, 1)
+    cfg = ChunkConfig.from_mapping({
+        "table": {
+            "policy_version": "rowband_v2",
+            "row_band_target_pixels": 6_000_000,
+            "row_band_safe_pixels": 10_000_000,
+            "allow_horizontal_split": True,
+        }
+    })
+    plan = TableStructurePlanner().plan(profile, hints, cfg)
+    assert len(plan.entries) < 100, f"too many bands: {len(plan.entries)}"

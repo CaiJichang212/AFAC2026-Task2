@@ -555,12 +555,21 @@ nohup .venv/bin/python -m finix_restore.cli \
   --config configs/table_v3.yaml \
   > outputs/table_train_run_v3.log 2>&1 &
 
+# 1b. A 榜评测集 (50 张, 无 GT, 仅产出提交 CSV, 不本地评分)
+nohup .venv/bin/python -m finix_restore.cli \
+  --input_dir "data/AFAC A榜评测数据集/finix_huge_table_rest_A/images" \
+  --work_dir outputs/table_eval_run_v3 \
+  --output_csv outputs/table_eval_run_v3/submission_A_table_eval_run_v3.csv \
+  --config configs/table_v3.yaml \
+  > outputs/table_eval_run_v3.log 2>&1 &
+
+
 # 2. 评分对比
 .venv/bin/python -m finix_restore.eval.cli \
   --pred outputs/table_train_run_v3/submission_A_table_train_run_v3.csv \
   --gt "data/AFAC 训练数据集/finixdocbench_huge_table_100/mds" \
   --mapping_csv "data/AFAC 训练数据集/finixdocbench_huge_table_100/id_mapping.csv" \
-  --output outputs/table_train_run_v3/metrics/table_eval.json
+  --output outputs/scores/table_train_run_v3.json
 
 # 3. 对比 run_v2 (Overall 17.68) 与 run_v3 的 mean_overall / mean_table_teds
 ```
